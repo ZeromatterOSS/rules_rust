@@ -186,10 +186,7 @@ fn consolidate_dependency_search_paths(
         unique_suffix
     );
 
-    let base_dir = std::env::current_dir().map_err(|e| {
-        ProcessWrapperError(format!("unable to read current working directory: {}", e))
-    })?;
-    let unified_dir = base_dir.join(&dir_name);
+    let unified_dir = std::env::temp_dir().join(&dir_name);
     fs::create_dir_all(&unified_dir).map_err(|e| {
         ProcessWrapperError(format!(
             "unable to create unified dependency directory {}: {}",
