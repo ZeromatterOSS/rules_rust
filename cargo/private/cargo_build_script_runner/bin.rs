@@ -62,6 +62,7 @@ fn run_buildrs() -> Result<(), String> {
 
     let mut exec_root_links = Vec::new();
     if should_symlink_exec_root() {
+        let exec_root_skip_patterns = symlink_exec_root_skip_patterns();
         // Symlink the execroot to the manifest_dir so that we can use relative paths in the arguments.
         let exec_root_paths = std::fs::read_dir(&exec_root)
             .map_err(|err| format!("Failed while listing exec root: {err:?}"))?;
@@ -75,6 +76,18 @@ fn run_buildrs() -> Result<(), String> {
             let file_name = path
                 .file_name()
                 .ok_or_else(|| "Failed while getting file name".to_string())?;
+
+            // Skip entries matching user-configurable patterns from
+            // RULES_RUST_SYMLINK_EXEC_ROOT_SKIP_PATTERNS (comma-separated).
+            // Patterns support trailing '*' as a prefix glob.
+            let name = file_name.to_string_lossy();
+            if exec_root_skip_patterns
+                .iter()
+                .any(|p| match_skip_pattern(p, &name))
+            {
+                continue;
+            }
+
             let link = manifest_dir.join(file_name);
 
             symlink_if_not_exists(&path, &link)
@@ -244,6 +257,26 @@ fn should_symlink_exec_root() -> bool {
     env::var("RULES_RUST_SYMLINK_EXEC_ROOT")
         .map(|s| s == "1")
         .unwrap_or(false)
+}
+
+/// Parse skip patterns from `RULES_RUST_SYMLINK_EXEC_ROOT_SKIP_PATTERNS`.
+/// Returns a comma-separated list of patterns. Each pattern is either an exact
+/// match or a prefix glob (trailing `*`).
+fn symlink_exec_root_skip_patterns() -> Vec<String> {
+    env::var("RULES_RUST_SYMLINK_EXEC_ROOT_SKIP_PATTERNS")
+        .map(|s| s.split(',').filter(|p| !p.is_empty()).map(|p| p.to_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// Match a skip pattern against a file name. Supports exact match and
+/// trailing `*` as a prefix glob (e.g. `local-spawn-runner.*` matches
+/// `local-spawn-runner.12345`).
+fn match_skip_pattern(pattern: &str, name: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else {
+        name == pattern
+    }
 }
 
 /// Create a symlink from `link` to `original` if `link` doesn't already exist.
@@ -469,5 +502,40 @@ windows
         let tree = parse_rustc_cfg_output(windows_output);
         assert_eq!(tree["CARGO_CFG_WINDOWS"], "");
         assert_eq!(tree["CARGO_CFG_TARGET_FAMILY"], "windows");
+    }
+
+    #[test]
+    fn skip_pattern_exact_match() {
+        assert!(match_skip_pattern(".git", ".git"));
+        assert!(!match_skip_pattern(".git", ".github"));
+        assert!(!match_skip_pattern(".git", ".gi"));
+        assert!(!match_skip_pattern(".git", ""));
+    }
+
+    #[test]
+    fn skip_pattern_prefix_glob() {
+        assert!(match_skip_pattern("local-spawn-runner.*", "local-spawn-runner.12345"));
+        assert!(match_skip_pattern("local-spawn-runner.*", "local-spawn-runner."));
+        assert!(!match_skip_pattern("local-spawn-runner.*", "local-spawn-runner"));
+        assert!(!match_skip_pattern("local-spawn-runner.*", "other-thing"));
+    }
+
+    #[test]
+    fn skip_pattern_star_alone() {
+        // A bare "*" pattern matches everything.
+        assert!(match_skip_pattern("*", "anything"));
+        assert!(match_skip_pattern("*", ""));
+    }
+
+    #[test]
+    fn skip_patterns_parsing_filters_empty() {
+        // Simulate what symlink_exec_root_skip_patterns() does after the filter fix.
+        let input = "a,,b,";
+        let patterns: Vec<String> = input
+            .split(',')
+            .filter(|p| !p.is_empty())
+            .map(|p| p.to_owned())
+            .collect();
+        assert_eq!(patterns, vec!["a", "b"]);
     }
 }
