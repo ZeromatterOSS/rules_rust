@@ -721,8 +721,8 @@ def _depend_on_metadata(crate_info, force_depend_on_objects, experimental_use_cc
 def _use_worker_pipelining(toolchain, crate_info):
     """Returns True if worker-managed pipelining should be used for this crate.
 
-    Worker pipelining requires pipelined_compilation AND experimental_worker_pipelining,
-    and only applies to rlib/lib crate types (the same as hollow rlib pipelining).
+    Worker pipelining is active when _worker_pipelining is set (derived from
+    experimental_pipelined_compilation=worker) and the crate is rlib/lib.
 
     Args:
         toolchain (rust_toolchain): The current target's rust_toolchain.
@@ -733,7 +733,6 @@ def _use_worker_pipelining(toolchain, crate_info):
     """
     return (
         toolchain._worker_pipelining and
-        toolchain._pipelined_compilation and
         crate_info.type in ("rlib", "lib")
     )
 
@@ -1537,14 +1536,12 @@ def rustc_compile_action(
     # (rustc exits naturally after writing .rmeta, no process-wrapper kill needed).
     use_hollow_rlib = bool(build_metadata) and crate_info.type in ("rlib", "lib") and not use_worker_pipelining
 
-    # Include pipelining mode in rustc flags so the action cache key differs
-    # between pipelining modes. Different modes produce .rlib/.rmeta with
-    # different SVH chains that are incompatible — sharing cached outputs
-    # across modes causes "can't find crate" errors (E0463).
-    if use_worker_pipelining:
-        rust_flags = rust_flags + ["--cfg=rules_rust_worker_pipelining"]
-    elif use_hollow_rlib:
-        rust_flags = rust_flags + ["--cfg=rules_rust_hollow_rlib"]
+    # Include a pipelining discriminator on ALL Rustc actions (not just pipelined
+    # rlibs) so the action cache key differs between pipelining-enabled and
+    # pipelining-disabled builds. RUSTC_BOOTSTRAP=1 changes SVH for all crates,
+    # so cached outputs from non-pipelined builds are incompatible (E0463).
+    if toolchain._pipelined_compilation:
+        rust_flags = rust_flags + ["--cfg=rules_rust_pipelined"]
 
     # Determine whether to use cc_common.link:
     #  * either if experimental_use_cc_common_link is 1,
@@ -1604,11 +1601,10 @@ def rustc_compile_action(
     )
 
     # The main Rustc action uses FULL rlib deps so the full rlib it produces records
-    # full-rlib SVHs. A downstream binary links against full rlibs; if the Rustc action
-    # had used hollow rlib deps instead, nondeterministic proc macros could produce
-    # different SVHs for the hollow vs full rlib, causing E0460 in the binary build.
-    # The RustcMetadata action still uses hollow rlibs (compile_inputs_for_metadata)
-    # so it can start before full codegen of its deps completes.
+    # full-rlib SVHs. This makes the dependency graph tier-consistent: hollow→hollow,
+    # full→full. Each tier has self-consistent SVH values, preventing E0460 even with
+    # nondeterministic proc macros. The RustcMetadata action still uses hollow rlibs
+    # (compile_inputs_for_metadata) so it can start before full codegen of deps completes.
     compile_inputs_for_metadata = compile_inputs
     if use_hollow_rlib:
         compile_inputs, _, _, _, _, _ = collect_inputs(
@@ -1733,9 +1729,13 @@ def rustc_compile_action(
     #
     # --json=artifacts is already emitted by construct_arguments via use_json_output=True.
     if use_worker_pipelining and build_metadata:
-        # Use crate_info.output.short_path (unique per output artifact) sanitized for
-        # filesystem use. This is collision-free and human-readable.
-        pipeline_key = crate_info.output.short_path.replace("/", "_").replace(".", "_")
+        # Use crate_info.output.path (includes the Bazel configuration hash) sanitized
+        # for filesystem use. We must use .path, not .short_path, because .short_path
+        # is the same across different configurations (e.g. k8-fastbuild vs
+        # k8-fastbuild-ST-<hash>). With identical keys, a metadata action from one
+        # config's rustc invocation could be consumed by a full action from a different
+        # config, producing an rlib with the wrong SVH chain (E0463).
+        pipeline_key = crate_info.output.path.replace("/", "_").replace(".", "_")
 
         # Metadata action: tell the worker to start rustc and return .rmeta early.
         args_metadata.rustc_flags.add("--pipelining-metadata")
@@ -1752,6 +1752,13 @@ def rustc_compile_action(
         # invocation, guaranteeing SVH consistency (single invocation per crate).
         args.rustc_flags.add("--pipelining-rlib-path={}".format(crate_info.output.path))
 
+        # Pass the metadata action's declared .rmeta output path so the standalone
+        # full action can verify SVH consistency after its rustc completes. If the
+        # .rmeta and the embedded lib.rmeta in the .rlib differ, a non-deterministic
+        # proc macro is present and the build should fail with a clear diagnostic
+        # rather than a cryptic E0463 in a downstream consumer.
+        args.rustc_flags.add("--pipelining-rmeta-path={}".format(crate_info.metadata.path))
+
     env = dict(ctx.configuration.default_shell_env)
 
     # this is the final list of env vars
@@ -1765,9 +1772,16 @@ def rustc_compile_action(
     # (PATH, etc.) in the action env so all actions share the same worker key.
     worker_env_file = None
     if use_worker_pipelining:
-        # Write all per-crate env vars to a file. The process_wrapper reads these
-        # via --env-file and sets them before running rustc.
-        env_content = "\n".join(["{}={}".format(k, v) for k, v in sorted(env_from_args.items())])
+        # Build the env file contents. RUSTC_BOOTSTRAP must be included here
+        # (not just in the action env) because in worker mode the process_wrapper
+        # reads env from this file, not from the OS-level action environment.
+        # Without it, the rlib would be compiled without RUSTC_BOOTSTRAP=1, while
+        # downstream binary/test actions (which run outside the worker) see
+        # RUSTC_BOOTSTRAP=1 from the action env — causing crate SVH mismatch (E0463).
+        worker_env = dict(env_from_args)
+        if toolchain._pipelined_compilation:
+            worker_env["RUSTC_BOOTSTRAP"] = "1"
+        env_content = "\n".join(["{}={}".format(k, v) for k, v in sorted(worker_env.items())])
         worker_env_file = ctx.actions.declare_file(crate_info.output.basename + ".worker_env")
         ctx.actions.write(worker_env_file, env_content)
 
@@ -1781,11 +1795,13 @@ def rustc_compile_action(
         # Strip per-crate vars from action env — keep only default_shell_env (PATH etc.)
         env = dict(ctx.configuration.default_shell_env)
 
-    if use_hollow_rlib:
-        # Both the metadata action and the full Rustc action must have RUSTC_BOOTSTRAP=1
-        # for SVH compatibility. RUSTC_BOOTSTRAP=1 changes the crate hash — setting it
-        # on only one action would cause SVH mismatch even for deterministic crates.
-        # This enables -Zno-codegen on stable Rust compilers for the metadata action.
+    if toolchain._pipelined_compilation:
+        # RUSTC_BOOTSTRAP=1 must be set on ALL Rustc actions (rlibs, binaries,
+        # tests, proc-macros) when any pipelining mode is active — not just on
+        # pipelined rlib actions. RUSTC_BOOTSTRAP changes the crate SVH, so a
+        # binary compiled without it cannot load rlibs compiled with it (E0463).
+        # This also enables -Zno-codegen on stable compilers for hollow-rlib
+        # metadata actions.
         env["RUSTC_BOOTSTRAP"] = "1"
 
     if hasattr(attr, "version") and attr.version != "0.0.0":
@@ -1891,14 +1907,20 @@ def rustc_compile_action(
                 outputs = [build_metadata] + [x for x in [rustc_rmeta_output] if x],
                 env = env,
                 arguments = args_metadata.all,
-                # When worker pipelining is active, use the same mnemonic as the
-                # full Rustc action so both actions share the same multiplex worker
-                # process. This is required because Bazel's worker key is derived
-                # from (mnemonic + executable + startup_args), and PipelineState is
-                # an in-process HashMap. With different mnemonics, RustcMetadata and
-                # Rustc would always go to different worker processes and could never
-                # share pipeline state.
-                mnemonic = "Rustc" if use_worker_pipelining else "RustcMetadata",
+                # All pipelining metadata actions use mnemonic "Rustc" (not
+                # "RustcMetadata") for two reasons:
+                # 1. Strategy equivalence: both pipelining modes (hollow-rlib and
+                #    worker) should present the same mnemonic so Bazel treats them
+                #    equivalently for strategy selection and aquery filtering.
+                # 2. Worker key sharing: Bazel derives the worker key from
+                #    (mnemonic + executable + startup_args). Worker pipelining
+                #    requires metadata and full actions to route to the same worker
+                #    process to share PipelineState.
+                # NOTE: This is a breaking change from the former "RustcMetadata"
+                # mnemonic. Users with aquery filters or tooling that matched on
+                # "RustcMetadata" should switch to filtering by output type
+                # (-hollow.rlib or .rmeta) instead.
+                mnemonic = "Rustc",
                 progress_message = "Compiling Rust metadata {} {}{} ({} file{})".format(
                     crate_info.type,
                     ctx.label.name,

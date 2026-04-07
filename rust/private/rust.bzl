@@ -659,8 +659,8 @@ RUSTC_ATTRS = {
     "_rustc_output_diagnostics": attr.label(
         default = Label("//rust/settings:rustc_output_diagnostics"),
     ),
-    "_worker_pipelining": attr.label(
-        default = Label("//rust/settings:experimental_worker_pipelining"),
+    "_experimental_pipelined_compilation": attr.label(
+        default = Label("//rust/settings:experimental_pipelined_compilation"),
     ),
 }
 

@@ -1,6 +1,10 @@
-/// A library that depends on svh_lib. When compiled against a hollow `.rmeta`
-/// of svh_lib, this crate's metadata records svh_lib's SVH at that point in
-/// time. If the full `.rlib` of svh_lib was produced by a separate rustc
-/// invocation (with a different HashMap seed), it may have a different SVH,
-/// causing a mismatch when a downstream binary tries to link against both.
+/// A library that depends on svh_lib. In worker-pipelining standalone mode,
+/// this crate's metadata and full actions both depend on svh_lib's `.rmeta`
+/// (a cross-tier dependency). If the separate rustc invocations for metadata
+/// and full produce different SVHs (due to non-deterministic proc macros in
+/// svh_lib), a downstream binary that loads this crate's `.rlib` will find
+/// svh_lib's `.rlib` SVH doesn't match, causing E0463 or E0460.
+///
+/// In hollow-rlib mode, the graph is tier-consistent (hollow→hollow, full→full),
+/// so this scenario does not arise.
 pub use svh_lib::Widget;

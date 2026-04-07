@@ -467,18 +467,106 @@ pub(crate) fn run_standalone(opts: &Options) -> Result<i32, ProcessWrapperError>
     Ok(code)
 }
 
+/// Checks whether a standalone worker-pipelining full action can skip rustc.
+///
+/// Returns `Ok(true)` if the `.rlib` exists (no-op path), `Ok(false)` if no
+/// `pipelining_rlib_path` is set or the `.rlib` is missing (must run rustc).
+///
+/// The main() function inlines this logic for clarity; this helper exists
+/// for unit tests in test/main.rs.
+#[cfg(test)]
+pub(crate) fn check_pipelining_full_prerequisites(
+    pipelining_rlib_path: &Option<String>,
+) -> Result<bool, ProcessWrapperError> {
+    match pipelining_rlib_path {
+        Some(rlib_path) if std::path::Path::new(rlib_path).exists() => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+/// Checks whether the standalone .rmeta from the metadata action matches the
+/// .rmeta that the full action's rustc produces. Both are from `--emit=metadata`,
+/// so they're structurally identical — a byte mismatch means a non-deterministic
+/// proc macro produced different SVH values across the two separate rustc
+/// invocations, which will cause E0460/E0463 downstream.
+///
+/// `full_rmeta_path` is a temp file produced by adding `--emit=metadata=<path>`
+/// to the full action's rustc invocation. `meta_rmeta_path` is the metadata
+/// action's declared .rmeta output (an input to this action).
+fn check_svh_consistency(
+    full_rmeta_path: &str,
+    meta_rmeta_path: &str,
+) -> Result<(), String> {
+    let full = fs::read(full_rmeta_path)
+        .map_err(|e| format!("failed to read full action rmeta {}: {}", full_rmeta_path, e))?;
+    let meta = fs::read(meta_rmeta_path)
+        .map_err(|e| format!("failed to read metadata action rmeta {}: {}", meta_rmeta_path, e))?;
+
+    if full == meta {
+        debug_log!(
+            "pipelining SVH check passed: metadata-action and full-action .rmeta match ({} bytes)",
+            meta.len()
+        );
+        return Ok(());
+    }
+
+    Err(format!(
+        concat!(
+            "ERROR: [rules_rust] SVH mismatch detected.\n",
+            "The metadata action and full action produced different crate hashes for\n",
+            "this crate. This is caused by a non-deterministic proc macro (e.g., one\n",
+            "that iterates a HashMap) in this crate's dependency graph.\n",
+            "\n",
+            "  metadata action .rmeta: {} ({} bytes)\n",
+            "  full action .rmeta:     {} ({} bytes)\n",
+            "\n",
+            "Downstream crates compiled against the metadata .rmeta will fail to link\n",
+            "against the full .rlib (E0460 SVH mismatch or E0463 can't find crate).\n",
+            "\n",
+            "To fix, either:\n",
+            "  1. Use worker execution: --strategy=Rustc=worker\n",
+            "     (single rustc process per crate, SVH always consistent)\n",
+            "  2. Use hollow-rlib pipelining:\n",
+            "     --@rules_rust//rust/settings:experimental_pipelined_compilation=hollow_rlib\n",
+            "     (tier-consistent graph, safe for all proc macros)\n",
+            "  3. Fix the proc macro to use BTreeMap/BTreeSet instead of HashMap/HashSet\n",
+            "     (eliminates non-deterministic iteration order)\n",
+        ),
+        meta_rmeta_path,
+        meta.len(),
+        full_rmeta_path,
+        full.len(),
+    ))
+}
+
+/// Warning message when a standalone full action must run a second rustc.
+const PIPELINING_STANDALONE_WARNING: &str = concat!(
+    "WARNING: [rules_rust] Worker pipelining full action executing outside a worker.\n",
+    "The metadata action's .rlib side-effect was not found, so a redundant second\n",
+    "rustc invocation will run. This happens when Bazel falls back from worker to\n",
+    "sandboxed or local execution (both run separate rustc processes). The build\n",
+    "will succeed if all proc macros are deterministic; nondeterministic proc macros\n",
+    "will be detected via SVH consistency check and fail with a clear diagnostic.\n",
+    "\n",
+    "To suppress this warning:\n",
+    "  1. Use worker execution: --strategy=Rustc=worker (default when supports-multiplex-workers is set)\n",
+    "  2. Use hollow-rlib pipelining: --@rules_rust//rust/settings:experimental_pipelined_compilation=hollow_rlib\n",
+);
+
 fn main() -> Result<(), ProcessWrapperError> {
     if std::env::args().any(|a| a == "--persistent_worker") {
         return worker::worker_main();
     }
 
-    let opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?;
+    let mut opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?;
 
     // Outside worker mode, a full pipelining action can no-op if the metadata
-    // action already produced the `.rlib`.
+    // action already produced the `.rlib` as a side-effect in the same execroot.
     if opts.pipelining_mode == Some(SubprocessPipeliningMode::Full) {
         if let Some(ref rlib_path) = opts.pipelining_rlib_path {
             if std::path::Path::new(rlib_path).exists() {
+                // .rlib side-effect found — metadata action already ran rustc
+                // in this execroot. No-op: just touch/copy outputs and exit.
                 debug_log!(
                     "pipelining no-op: .rlib already exists at {}, skipping rustc",
                     rlib_path
@@ -505,35 +593,67 @@ fn main() -> Result<(), ProcessWrapperError> {
                     let _ = fs::remove_file(path);
                 }
                 exit(0);
+            } else {
+                // .rlib side-effect missing (sandboxed execution or remote leg).
+                // Warn and fall through to run a second rustc.
+                eprintln!("{}", PIPELINING_STANDALONE_WARNING);
             }
-            eprintln!(concat!(
-                "WARNING: [rules_rust] Worker pipelining full action executing outside a worker.\n",
-                "The metadata action's .rlib side-effect was not found, so a redundant second\n",
-                "rustc invocation will run. This happens when Bazel falls back from worker to\n",
-                "sandboxed execution (sandbox discards undeclared outputs). The build may still\n",
-                "succeed if all proc macros are deterministic, but nondeterministic proc macros\n",
-                "will cause E0460 (SVH mismatch).\n",
-                "\n",
-                "To fix: set --@rules_rust//rust/settings:experimental_worker_pipelining=false\n",
-                "        to use hollow-rlib pipelining (safe for all execution strategies).\n",
-            ));
         }
     }
 
+    // SVH consistency check: when the standalone full action must run a second
+    // rustc (no .rlib side-effect from the metadata action), inject
+    // `--emit=metadata=<temp>` so this rustc also produces a standalone .rmeta.
+    // After success, compare it with the metadata action's .rmeta. A byte
+    // mismatch means non-deterministic proc macros produced different SVHs.
+    // Multiple `--emit` flags are additive in rustc, so this is safe.
+    let svh_check_rmeta_path = if opts.pipelining_mode == Some(SubprocessPipeliningMode::Full)
+        && opts.pipelining_rmeta_path.is_some()
+    {
+        let temp_rmeta = format!("{}.svh_check", opts.pipelining_rmeta_path.as_ref().unwrap());
+        opts.child_arguments
+            .push(format!("--emit=metadata={}", temp_rmeta));
+        Some(temp_rmeta)
+    } else {
+        None
+    };
+
     let code = run_standalone(&opts)?;
 
-    if code != 0
-        && opts.pipelining_mode == Some(SubprocessPipeliningMode::Full)
-        && opts
-            .pipelining_rlib_path
-            .as_ref()
-            .is_some_and(|p| !std::path::Path::new(p).exists())
-    {
-        eprintln!(concat!(
-            "\nERROR: [rules_rust] Redundant rustc invocation failed (see warning above).\n",
-            "If the error is E0460 (SVH mismatch), set:\n",
-            "  --@rules_rust//rust/settings:experimental_worker_pipelining=false\n",
-        ));
+    if opts.pipelining_mode == Some(SubprocessPipeliningMode::Full) {
+        if code != 0
+            && opts
+                .pipelining_rlib_path
+                .as_ref()
+                .is_some_and(|p| !std::path::Path::new(p).exists())
+        {
+            eprintln!(concat!(
+                "\nERROR: [rules_rust] Redundant rustc invocation failed (see warning above).\n",
+                "If the error is E0460 (SVH mismatch), switch to hollow-rlib pipelining:\n",
+                "  --@rules_rust//rust/settings:experimental_pipelined_compilation=hollow_rlib\n",
+            ));
+        } else if code == 0 {
+            // Rustc succeeded — check for SVH mismatch between the metadata
+            // action's .rmeta and the full action's .rmeta (produced by the
+            // injected --emit=metadata). Both are standalone .rmeta files from
+            // --emit=metadata, so a byte mismatch means different SVH.
+            if let (Some(full_rmeta), Some(meta_rmeta)) =
+                (&svh_check_rmeta_path, &opts.pipelining_rmeta_path)
+            {
+                let result = check_svh_consistency(full_rmeta, meta_rmeta);
+                // Clean up the temp .rmeta regardless of result.
+                let _ = fs::remove_file(full_rmeta);
+                if let Err(msg) = result {
+                    eprintln!("{}", msg);
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    // Clean up svh check temp file on failure path too.
+    if let Some(ref path) = svh_check_rmeta_path {
+        let _ = fs::remove_file(path);
     }
 
     exit(code)

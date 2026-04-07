@@ -15,11 +15,11 @@ load(
     "experimental_incremental",
     "experimental_link_std_dylib",
     "experimental_per_crate_rustc_flag",
+    "experimental_pipelined_compilation",
     "experimental_use_allocator_libraries_with_mangled_symbols",
     "experimental_use_cc_common_link",
     "experimental_use_coverage_metadata_files",
     "experimental_use_global_allocator",
-    "experimental_worker_pipelining",
     "extra_exec_rustc_env",
     "extra_exec_rustc_flag",
     "extra_exec_rustc_flags",
@@ -31,7 +31,6 @@ load(
     "incompatible_do_not_include_transitive_data_in_compile_inputs",
     "lto",
     "no_std",
-    "pipelined_compilation",
     "rename_first_party_crates",
     "require_explicit_unstable_features",
     "rustc_output_diagnostics",
@@ -79,7 +78,7 @@ collect_cfgs()
 
 experimental_incremental()
 
-experimental_worker_pipelining()
+experimental_pipelined_compilation()
 
 default_allocator_library()
 
@@ -120,8 +119,6 @@ incompatible_do_not_include_transitive_data_in_compile_inputs()
 lto()
 
 no_std()
-
-pipelined_compilation()
 
 rename_first_party_crates()
 

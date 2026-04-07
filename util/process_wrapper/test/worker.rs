@@ -1,6 +1,7 @@
 use super::args::{
     apply_substs, assemble_request_argv, build_rustc_env, expand_rustc_args_with_metadata,
-    extract_direct_request_pw_flags, find_out_dir_in_expanded, prepare_rustc_args,
+    extract_direct_request_pw_flags, find_out_dir_in_expanded, find_out_dir_in_request,
+    prepare_rustc_args,
     rewrite_expanded_rustc_outputs, scan_pipelining_flags, split_startup_args,
     strip_pipelining_flags,
 };
@@ -160,6 +161,39 @@ fn test_prepare_outputs_sandboxed_relative_paramfile() {
     prepare_outputs(&args, Some(sandbox_dir.as_path()));
 
     assert!(!fs::metadata(&file_path).unwrap().permissions().readonly());
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_find_out_dir_in_request_reads_arg_file() {
+    use std::fs;
+
+    let tmp = std::env::temp_dir().join("pw_test_find_out_dir_in_request_reads_arg_file");
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let arg_file = tmp.join("rustc.args");
+    fs::write(
+        &arg_file,
+        "--crate-name=foo\n--out-dir=bazel-out/k8-fastbuild/bin/pkg/_worker_pipelining\n",
+    )
+    .unwrap();
+
+    let args = vec![
+        "--".to_string(),
+        "rustc".to_string(),
+        "--pipelining-full".to_string(),
+        "--pipelining-key=foo_key".to_string(),
+        "--arg-file".to_string(),
+        arg_file.display().to_string(),
+    ];
+
+    let out_dir = find_out_dir_in_request(&args, &tmp).expect("expected out-dir");
+    assert_eq!(
+        out_dir.as_str(),
+        "bazel-out/k8-fastbuild/bin/pkg/_worker_pipelining"
+    );
+
     let _ = fs::remove_dir_all(&tmp);
 }
 

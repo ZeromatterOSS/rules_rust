@@ -35,6 +35,44 @@ execroot:
 This avoids the earlier split where pre-registration and execution could
 disagree about whether a request was pipelined.
 
+## Metadata Classes
+
+Rust pipelining depends on an intermediate metadata artifact that lets downstream
+crates start compiling before upstream codegen finishes. There are two distinct
+classes of metadata artifact, with different portability and safety properties:
+
+**Fast metadata** (`.rmeta`, `--emit=metadata`):
+- Produced quickly by rustc as a compilation milestone
+- Good for early checking and for pipelining within a single rustc process
+- Not portable as the metadata input for a separate full-codegen invocation —
+  if a non-deterministic proc macro produces different SVH values across two
+  rustc processes, downstream consumers see E0463 or E0460
+- Used by Cargo (single rustc per crate) and by worker pipelining in rules_rust
+
+**Full metadata** (hollow `.rlib`, `--emit=link` with `-Zno-codegen`):
+- A hollow rlib containing metadata but no object code
+- Portable as input to downstream Rust codegen in a two-invocation graph
+- The dependency graph is tier-consistent: hollow actions depend on upstream
+  hollow rlibs, full actions depend on upstream full rlibs — so non-deterministic
+  proc macros do not cause SVH mismatch
+- Used by Buck2 (`metadata-full`) and by hollow-rlib pipelining in rules_rust
+
+This distinction maps to pipelining modes:
+
+| Mode | Metadata class | Artifact | Portable across strategies |
+|------|---------------|----------|---------------------------|
+| Worker pipelining | Fast metadata | `.rmeta` | No — requires same rustc process |
+| Hollow-rlib pipelining | Full metadata | hollow `.rlib` | Yes — safe with any execution strategy |
+
+Worker pipelining is Cargo-like: one rustc per crate, metadata and final artifact
+from the same process, safety from process identity. Hollow-rlib pipelining is
+Buck2-like: two rustc invocations per crate, a tier-consistent graph, safety from
+graph structure.
+
+For builds that may use sandboxed, remote, or dynamic execution — or any
+configuration where the metadata and full actions might run as separate
+processes — **hollow_rlib is the recommended portable mode**.
+
 ## Request Coordination and Invocation Lifecycle
 
 `RequestCoordinator` (in `worker.rs`) tracks two data structures:
@@ -105,16 +143,91 @@ implementation details rather than on a Bazel-guaranteed contract. For that
 reason, sandboxed worker pipelining should still be treated as
 contract-sensitive, and the hollow-rlib path remains the compatibility fallback.
 
-## Standalone Full-Action Optimization
+## Standalone Full-Action Behavior
 
 Outside worker mode, a `--pipelining-full` action may be redundant. If the
 metadata action already produced the final `.rlib` as a side effect and that
-file still exists, standalone mode skips the second rustc invocation and only
-performs the normal post-success actions (`touch_file`, `copy_output`).
+file still exists (unsandboxed local execution), standalone mode skips the
+second rustc invocation and only performs the normal post-success actions
+(`touch_file`, `copy_output`).
 
-If the `.rlib` is missing, the wrapper falls back to a normal standalone rustc
-run and prints guidance about disabling worker pipelining when the execution
-strategy cannot preserve the side effect.
+If the `.rlib` is missing — which happens under sandboxed, local, or remote
+execution because the metadata action's separate rustc process does not produce
+the undeclared `.rlib` side effect — the process wrapper warns and falls through
+to run a second rustc. After rustc succeeds, it performs an SVH consistency
+check: the full action injects `--emit=metadata=<temp>` to produce a standalone
+`.rmeta`, then byte-compares it with the metadata action's `.rmeta` (passed via
+`--pipelining-rmeta-path`). If they match, the crate's proc macros are
+deterministic and the build proceeds. If they differ, a non-deterministic proc
+macro produced different SVH values across the two rustc invocations, and the
+build fails immediately with a diagnostic listing fix options (use worker
+strategy, switch to hollow_rlib, or fix the proc macro).
+
+This check catches the SVH mismatch at the source crate rather than producing
+a cryptic E0463 in a downstream consumer. Under dynamic execution, the remote
+leg fails fast, the local worker leg wins the race, and the build succeeds.
+
+## Execution Strategy Compatibility
+
+Three pipelining modes interact with Bazel's execution strategies. The matrix
+below shows which combinations are supported.
+
+### Execution requirements by mode
+
+| Mode | `requires-worker-protocol` | `supports-multiplex-workers` | `supports-multiplex-sandboxing` |
+|------|---|---|---|
+| No pipelining | — | — | — |
+| Hollow-rlib | — | — | — |
+| Worker pipelining | `json` | `1` | `1` |
+
+Hollow-rlib and no-pipelining actions are plain subprocesses with no worker
+execution requirements (unless incremental compilation is separately enabled).
+Worker-pipelining actions declare multiplex worker support and multiplex
+sandboxing support.
+
+### Compatibility matrix
+
+```
+                  local    sandboxed   worker   worker+mx-sandbox   dynamic    remote
+No pipelining       ✓         ✓        n/a          n/a               ✓          ✓
+Hollow-rlib         ✓         ✓        n/a          n/a               ✓          ✓
+Worker pipeline     ✓*        ✓*        ✓           ✓                ✓¹         ✓*
+```
+
+\* **Deterministic proc macros only.** The full action runs a separate rustc
+   process and checks SVH consistency afterward. If a non-deterministic proc
+   macro produces different SVH values, the build fails immediately with a
+   diagnostic (rather than a cryptic E0463 in a downstream consumer). Use
+   worker strategy or switch to hollow_rlib for non-deterministic proc macros.
+
+1. **dynamic + worker pipeline:** Bazel forces `mustSandbox=true` for dynamic
+   execution. Because the action declares `supports-multiplex-sandboxing: 1`,
+   the local leg runs as a **multiplex sandboxed worker** — the worker process
+   is shared across requests but each request gets a `sandboxDir`. The remote
+   leg runs process_wrapper as a one-shot standalone process (pipelining flags
+   stripped). If the remote leg wins the race for a full action, it runs a
+   second rustc with SVH checking — non-deterministic proc macros fail fast
+   and the local worker leg wins the race.
+
+### Why hollow-rlib shows n/a for worker
+
+`_build_worker_exec_reqs()` with `use_worker_pipelining=False` (and no
+incremental) returns an empty dict — no `supports-workers` or
+`supports-multiplex-workers`. Bazel will not route these actions to a worker
+process.
+
+### Recommended configurations
+
+| Use case | Settings | Metadata class |
+|---|---|---|
+| Portable builds (sandboxed, remote, dynamic, mixed) | `experimental_pipelined_compilation=hollow_rlib` | Full metadata |
+| Maximum parallelism (local worker builds) | `experimental_pipelined_compilation=worker`, `--strategy=Rustc=worker` | Fast metadata |
+| Dynamic execution | `experimental_pipelined_compilation=worker`, `--strategy=Rustc=dynamic`, `--experimental_worker_multiplex_sandboxing` | Fast metadata (local), standalone fallback (remote) |
+
+**hollow_rlib is the safe default for any build that may run outside a persistent
+worker.** It uses full metadata (tier-consistent graph) and is compatible with all
+execution strategies. Worker pipelining uses fast metadata and achieves higher
+parallelism but requires worker execution to guarantee single-process safety.
 
 ## Determinism Contract
 
@@ -122,6 +235,11 @@ Bazel persistent workers are expected to produce the same outputs as standalone
 execution. For Rust pipelining this becomes a hard requirement under dynamic
 execution: a local worker leg and a remote standalone leg may race, so the
 resulting `.rlib` and `.rmeta` artifacts must be byte-for-byte identical.
+
+> "The invariant, however, is that strategies do _not_ affect the semantics of
+> the execution: that is, running the same command line on strategy A and
+> strategy B must yield the same output files."
+> — Julio Merino, [What are Bazel's strategies?](https://jmmv.dev/2019/12/bazel-strategies.html)
 
 There are two relevant worker paths:
 
@@ -137,6 +255,47 @@ the worker must be preserved in standalone comparisons, including
 `--error-format=json` and `--json=artifacts`, because those flags affect the
 metadata rustc emits and therefore the crate hash embedded in downstream-facing
 artifacts.
+
+### Strategy-Equivalence Unification
+
+Both pipelining modes (hollow-rlib and worker) must produce equivalent
+rustc-visible behavior so that switching between them — or switching execution
+strategies within worker-pipelining mode — does not change the output.
+
+The following properties are unified across modes:
+
+- **`RUSTC_BOOTSTRAP=1`**: set on **every** Rustc action (rlibs, binaries,
+  tests, proc-macros) when any pipelining mode is active. 
+  `RUSTC_BOOTSTRAP` changes the crate SVH; a binary compiled
+  without it cannot load rlibs compiled with it (E0463). 
+- **`--cfg=rules_rust_pipelined`**: set on every Rustc action when pipelining
+  is active. Distinguishes pipelining-enabled from pipelining-disabled builds
+  in the action cache so cached artifacts are not reused across modes. The two
+  pipelining modes (hollow-rlib and worker) already differ in `--emit` flags
+  and declared outputs, so their cache keys are naturally distinct from each
+  other.
+- **Mnemonic `"Rustc"`**: all pipelining metadata actions use mnemonic `"Rustc"`
+  (not `"RustcMetadata"`). This ensures Bazel treats all pipelining rustc
+  actions equivalently for strategy selection.
+
+Irreducible differences that remain (format-driven, not behavioral):
+
+- `--emit` shape: `--emit=link=<hollow.rlib>` vs `--emit=metadata=<path>,link`
+- `-Zno-codegen`: only on hollow-rlib metadata action
+- `--pipelining-*` protocol flags: only on worker-pipelining actions (stripped
+  before rustc sees them)
+- Env delivery: worker-pipelining uses `.worker_env` files for worker-key
+  sharing; hollow-rlib uses direct action env. Both deliver the same vars to
+  the rustc child process.
+
+The design principle enforced here:
+
+1. Outside worker mode, a worker-pipelining action should emulate the worker
+   result with one combined rustc invocation that matches the worker
+   rustc-visible behavior as closely as possible.
+2. If the .rlib side-effect is not available, warn and fall through to a second
+   rustc. Users with non-deterministic proc macros should use hollow-rlib mode,
+   whose tier-consistent graph (hollow→hollow, full→full) avoids SVH mismatch.
 
 ## Determinism Test Strategy
 
@@ -165,6 +324,52 @@ is planned but not yet implemented. The intended approach:
 The `.rmeta` comparison is as important as the `.rlib` comparison because
 downstream crates compile against metadata first; a metadata mismatch can expose
 different SVH or type information even if the final archive happens to link.
+
+## Regression Test Coverage
+
+`worker_pipelining_nondeterministic_test.sh` exercises the actual failure
+boundary around non-deterministic proc macros across all pipelining modes:
+
+| Phase | Mode | Execution | Metadata class | Expected |
+|-------|------|-----------|---------------|----------|
+| 1 | Worker pipelining | Worker | Fast metadata | PASS (single rustc) |
+| 2 | No pipelining | Local | — | PASS (baseline) |
+| 3 | Hollow-rlib | Local | Full metadata | PASS (tier-consistent) |
+| 4 | Worker pipelining | Sandboxed | Fast metadata | FAIL (SVH mismatch) |
+
+Phase 4 verifies that the process_wrapper SVH consistency check catches the
+mismatch and produces a clear diagnostic. The practical error symptoms include:
+
+- `E0460`: crate found with incompatible SVH (downstream consumer gets the
+  wrong version hash from the metadata action's `.rmeta` vs the full `.rlib`)
+- `E0463`: can't find crate (rustc cannot match the SVH at all and treats the
+  crate as missing)
+
+Both errors are valid manifestations of the same root cause: the fast metadata
+`.rmeta` from one rustc invocation has a different SVH than the full `.rlib`
+from a separate invocation when a non-deterministic proc macro is involved.
+
+## Artifact Hash Instrumentation
+
+`artifact_hash_check.sh` in `test/unit/pipelined_compilation/` provides
+manual instrumentation for investigating SVH consistency. It computes
+SHA-256 hashes for three artifact types:
+
+1. **Declared metadata artifact** — the hollow `.rlib` (hollow_rlib mode) or
+   `.rmeta` (worker mode) that downstream metadata actions consume
+2. **Full `.rlib`** — the final archive that downstream full actions consume
+3. **Embedded `lib.rmeta`** — the metadata section extracted from the full
+   `.rlib` via `ar x`
+
+This instrumentation is useful for:
+
+- Validating that a rustc version change has not broken SVH compatibility
+- Comparing artifacts across pipelining modes or execution strategies
+- Investigating whether a specific proc macro is deterministic
+- Future rustc experiments (e.g., testing a hypothetical stable `-Zno-codegen`
+  replacement or a first-class "full `.rmeta`" output mode)
+
+The script is tagged `manual` and is not part of the automated test suite.
 
 ## Module Structure
 
@@ -234,9 +439,6 @@ current on this branch:
 The implementation is substantially more complete than the old plan, but a few
 design questions remain open:
 
-- What support level should sandboxed worker pipelining have in public docs:
-  experimental with clear caveats, or supported only under a narrower set of
-  execution modes?
 - If strict post-response sandbox compliance is required, should sandboxed and
   dynamic modes fall back to the hollow-rlib two-invocation path, or should a
   different strict-sandbox design replace the current one-rustc handoff?

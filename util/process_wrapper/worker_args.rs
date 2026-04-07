@@ -15,7 +15,7 @@
 //! Argument parsing and rewriting for the persistent worker.
 
 use crate::options::{
-    is_pipelining_flag, is_relocated_pw_flag, NormalizedRustcMetadata,
+    is_pipelining_flag, is_relocated_pw_flag, parse_pw_args, NormalizedRustcMetadata,
     OptionError, ParsedPwArgs, RelocatedPwFlags,
 };
 use crate::pw_args::{
@@ -195,6 +195,21 @@ pub(super) fn prepare_rustc_args(
     let original_out_dir = OutputDir(find_out_dir_in_expanded(&rustc_args).unwrap_or_default());
 
     Ok((rustc_args, original_out_dir, metadata.relocated))
+}
+
+/// Resolves the request's declared `--out-dir`, including any `@paramfile` or
+/// `--arg-file` contents, using the same path as metadata-request preparation.
+pub(super) fn find_out_dir_in_request(
+    args: &[String],
+    base_dir: &std::path::Path,
+) -> Option<OutputDir> {
+    let filtered = strip_pipelining_flags(args);
+    let mut parts = filtered.splitn(2, |a| a == "--");
+    let pw_raw = parts.next()?;
+    let rustc_and_after = parts.next().filter(|s| !s.is_empty())?;
+    let pw_args = parse_pw_args(pw_raw, base_dir);
+    let (_, out_dir, _) = prepare_rustc_args(rustc_and_after, &pw_args, base_dir).ok()?;
+    Some(out_dir)
 }
 
 /// Rewrites output-related rustc args in one pass and returns the writable

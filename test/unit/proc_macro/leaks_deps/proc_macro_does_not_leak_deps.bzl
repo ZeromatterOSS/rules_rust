@@ -143,7 +143,7 @@ def _proc_macro_does_not_leak_lib_deps_test():
 proc_macro_does_not_leak_lib_deps_test = analysistest.make(
     _proc_macro_does_not_leak_lib_deps_impl,
     config_settings = {
-        str(Label("//rust/settings:pipelined_compilation")): True,
+        str(Label("//rust/settings:experimental_pipelined_compilation")): "hollow_rlib",
     },
 )
 

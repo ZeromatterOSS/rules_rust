@@ -154,6 +154,7 @@ pub(crate) struct RelocatedPwFlags {
     pub(crate) volatile_status_file: Option<String>,
     pub(crate) pipelining_mode: Option<SubprocessPipeliningMode>,
     pub(crate) pipelining_rlib_path: Option<String>,
+    pub(crate) pipelining_rmeta_path: Option<String>,
 }
 
 impl RelocatedPwFlags {
@@ -178,6 +179,9 @@ impl RelocatedPwFlags {
         if other.pipelining_rlib_path.is_some() {
             self.pipelining_rlib_path = other.pipelining_rlib_path;
         }
+        if other.pipelining_rmeta_path.is_some() {
+            self.pipelining_rmeta_path = other.pipelining_rmeta_path;
+        }
     }
 }
 
@@ -197,6 +201,7 @@ pub(crate) const PIPELINING_METADATA_FLAG: &str = "--pipelining-metadata";
 pub(crate) const PIPELINING_FULL_FLAG: &str = "--pipelining-full";
 pub(crate) const PIPELINING_KEY_PREFIX: &str = "--pipelining-key=";
 pub(crate) const PIPELINING_RLIB_PATH_PREFIX: &str = "--pipelining-rlib-path=";
+pub(crate) const PIPELINING_RMETA_PATH_PREFIX: &str = "--pipelining-rmeta-path=";
 
 /// Returns true for worker pipelining protocol flags that should not reach rustc.
 pub(crate) fn is_pipelining_flag(arg: &str) -> bool {
@@ -204,6 +209,7 @@ pub(crate) fn is_pipelining_flag(arg: &str) -> bool {
         || arg == PIPELINING_FULL_FLAG
         || arg.starts_with(PIPELINING_KEY_PREFIX)
         || arg.starts_with(PIPELINING_RLIB_PATH_PREFIX)
+        || arg.starts_with(PIPELINING_RMETA_PATH_PREFIX)
 }
 
 /// Returns true for process_wrapper flags that may be relocated into a paramfile.
@@ -298,6 +304,9 @@ pub(crate) fn normalize_args_recursive(
             continue;
         } else if let Some(path) = arg.strip_prefix(PIPELINING_RLIB_PATH_PREFIX) {
             metadata.relocated.pipelining_rlib_path = Some(path.to_owned());
+            continue;
+        } else if let Some(path) = arg.strip_prefix(PIPELINING_RMETA_PATH_PREFIX) {
+            metadata.relocated.pipelining_rmeta_path = Some(path.to_owned());
             continue;
         }
         if is_relocated_pw_flag(&arg) {

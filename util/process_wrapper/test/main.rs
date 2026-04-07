@@ -145,6 +145,39 @@ fn test_run_standalone_cleans_up_expanded_paramfiles() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn test_standalone_full_returns_false_when_rlib_missing() {
+    let result = super::check_pipelining_full_prerequisites(
+        &Some("/nonexistent/path/libfoo.rlib".to_string()),
+    );
+    assert!(result.is_ok(), "Expected Ok(false) when .rlib missing");
+    assert_eq!(result.unwrap(), false, ".rlib missing should return false (run rustc)");
+}
+
+#[test]
+fn test_standalone_full_noop_when_rlib_exists() {
+    let tmp = std::env::temp_dir().join("pw_test_fail_closed_noop");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let rlib_path = tmp.join("libfoo.rlib");
+    std::fs::write(&rlib_path, b"fake rlib").unwrap();
+
+    let result = super::check_pipelining_full_prerequisites(
+        &Some(rlib_path.to_str().unwrap().to_string()),
+    );
+    assert!(result.is_ok(), "Expected Ok(true) when .rlib exists");
+    assert_eq!(result.unwrap(), true);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_standalone_full_no_rlib_path_is_noop() {
+    let result = super::check_pipelining_full_prerequisites(&None);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), false);
+}
+
 /// Resolves the real rustc binary from the runfiles tree.
 fn resolve_rustc() -> std::path::PathBuf {
     let r = runfiles::Runfiles::create().unwrap();

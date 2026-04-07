@@ -392,8 +392,9 @@ def _rust_toolchain_impl(ctx):
 
     rename_first_party_crates = ctx.attr._rename_first_party_crates[BuildSettingInfo].value
     third_party_dir = ctx.attr._third_party_dir[BuildSettingInfo].value
-    pipelined_compilation = ctx.attr._pipelined_compilation[BuildSettingInfo].value
-    worker_pipelining = ctx.attr._worker_pipelining[BuildSettingInfo].value
+    pipelining_mode = ctx.attr._experimental_pipelined_compilation[BuildSettingInfo].value
+    pipelined_compilation = pipelining_mode != "off"
+    worker_pipelining = pipelining_mode == "worker"
     no_std = ctx.attr._no_std[BuildSettingInfo].value
     lto = ctx.attr.lto[RustLtoInfo]
 
@@ -880,8 +881,8 @@ rust_toolchain = rule(
         "_no_std": attr.label(
             default = Label("//rust/settings:no_std"),
         ),
-        "_pipelined_compilation": attr.label(
-            default = Label("//rust/settings:pipelined_compilation"),
+        "_experimental_pipelined_compilation": attr.label(
+            default = Label("//rust/settings:experimental_pipelined_compilation"),
         ),
         "_rename_first_party_crates": attr.label(
             default = Label("//rust/settings:rename_first_party_crates"),
@@ -895,9 +896,6 @@ rust_toolchain = rule(
                 "Label to a boolean build setting that lets the rule knows whether to set --sysroot to rustc. " +
                 "This flag is only relevant when used together with --@rules_rust//rust/settings:toolchain_generated_sysroot."
             ),
-        ),
-        "_worker_pipelining": attr.label(
-            default = Label("//rust/settings:experimental_worker_pipelining"),
         ),
     },
     toolchains = [

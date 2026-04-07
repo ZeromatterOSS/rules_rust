@@ -2,11 +2,18 @@
 
 Test matrix — pipelining mode × test layer:
 
-  Hollow-rlib pipelining uses -Zno-codegen (two actions, two rustc processes).
-  Worker pipelining uses a single rustc process per crate (metadata + full).
-  -Zno-codegen does NOT change SVH, so hollow rlibs are SVH-compatible by design.
-  However, non-deterministic proc macros (e.g. HashMap iteration) run independently
-  in each rustc process, which CAN cause SVH mismatch with any two-process approach.
+  Hollow-rlib pipelining ("full metadata", Buck2-style): two actions per crate,
+  each a separate rustc process. Metadata action uses -Zno-codegen to produce a
+  hollow .rlib containing full metadata. The graph is tier-consistent (hollow→hollow,
+  full→full), so non-deterministic proc macros do NOT cause SVH mismatch.
+  Compatible with all execution strategies (local, sandboxed, remote, dynamic).
+
+  Worker pipelining ("fast metadata", Cargo-style): one rustc process per crate.
+  Metadata action returns early when .rmeta is emitted; full action joins the same
+  process. Safety depends on keeping one rustc per crate. Has a cross-tier
+  dependency (full action → upstream .rmeta) when running outside a worker, so
+  non-deterministic proc macros cause SVH mismatch under sandboxed, local, or
+  remote execution.
 
                           │ no pipelining     │ hollow-rlib           │ worker pipelining
                           │ (pipeline=false)  │ (pipeline=true,       │ (pipeline=true,
@@ -24,23 +31,31 @@ Artifact determinism      │ (precondition in  │ (covered by analysis: │ te
                           │                   │  flags / RUSTC_BOOT-  │
                           │                   │  STRAP across actions)│
 ──────────────────────────┼───────────────────┼───────────────────────┼──────────────────────────
-E2E nondet proc macro     │ nondeterministic_ │ svh_mismatch_test     │ nondeterministic_
-(sh_tests / rust_test)    │ test.sh Phase 2   │ (flaky: nondet proc   │   test.sh Phase 1
-                          │                   │  macro in 2 processes)│
+E2E nondet proc macro     │ nondeterministic_ │ nondeterministic_     │ nondeterministic_
+(sh_tests / rust_test)    │ test.sh Phase 2   │ test.sh Phase 3       │   test.sh Phase 1
+                          │ (baseline: no     │ (full metadata,       │   (fast metadata,
+                          │  pipelining,      │  tier-consistent      │    worker exec,
+                          │  must pass)       │  graph, must pass)    │    must pass)
+                          │                   │                       │
+                          │                   │ svh_mismatch_test     │ nondeterministic_
+                          │                   │ (rust_test, flaky)    │   test.sh Phase 4
+                          │                   │                       │   (fast metadata,
+                          │                   │                       │    sandboxed exec,
+                          │                   │                       │    expected: E0460
+                          │                   │                       │    or E0463)
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 load("//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
-load("//test/unit:common.bzl", "assert_argv_contains", "assert_list_contains_adjacent_elements_not")
+load("//test/unit:common.bzl", "assert_argv_contains", "assert_argv_contains_not", "assert_list_contains_adjacent_elements_not")
 load(":wrap.bzl", "wrap")
 
 ENABLE_PIPELINING = {
-    str(Label("//rust/settings:pipelined_compilation")): True,
+    str(Label("//rust/settings:experimental_pipelined_compilation")): "hollow_rlib",
 }
 
 ENABLE_WORKER_PIPELINING = {
-    str(Label("//rust/settings:pipelined_compilation")): True,
-    str(Label("//rust/settings:experimental_worker_pipelining")): True,
+    str(Label("//rust/settings:experimental_pipelined_compilation")): "worker",
 }
 
 # TODO: Fix pipeline compilation on windows
@@ -53,8 +68,19 @@ _NO_WINDOWS = select({
 def _second_lib_test_impl(ctx):
     env = analysistest.begin(ctx)
     tut = analysistest.target_under_test(env)
-    rlib_action = [act for act in tut.actions if act.mnemonic == "Rustc"][0]
-    metadata_action = [act for act in tut.actions if act.mnemonic == "RustcMetadata"][0]
+
+    # Both metadata and full actions use mnemonic "Rustc"; distinguish by output type.
+    rustc_actions = [act for act in tut.actions if act.mnemonic == "Rustc"]
+    rlib_action = [
+        act
+        for act in rustc_actions
+        if len([o for o in act.outputs.to_list() if o.path.endswith(".rlib") and not o.path.endswith("-hollow.rlib")]) > 0
+    ][0]
+    metadata_action = [
+        act
+        for act in rustc_actions
+        if len([o for o in act.outputs.to_list() if o.path.endswith("-hollow.rlib")]) > 0
+    ][0]
 
     # Hollow rlib approach: Rustc action uses --emit=dep-info,link (no metadata).
     assert_argv_contains(env, rlib_action, "--emit=dep-info,link")
@@ -98,10 +124,9 @@ def _second_lib_test_impl(ctx):
 
     # The metadata action references first's hollow rlib for --extern (pipelining: starts
     # before first's full codegen finishes). The Rustc action uses the full rlib for
-    # --extern so the full rlib's embedded SVH matches the full rlib that downstream
-    # binaries (without cc_common.link) see in their -Ldependency path. If both actions
-    # used the hollow rlib, nondeterministic proc macros could produce different SVHs
-    # for the hollow vs full rlib, causing E0460 in downstream binary builds.
+    # --extern. This tier-consistent wiring (hollow→hollow, full→full) ensures that SVH
+    # references are self-consistent within each tier, preventing E0460 even with
+    # nondeterministic proc macros.
     extern_metadata = [arg for arg in metadata_action.argv if arg.startswith("--extern=first=") and "libfirst" in arg and arg.endswith("-hollow.rlib")]
     asserts.true(
         env,
@@ -202,9 +227,15 @@ def _rmeta_is_propagated_through_custom_rule_test_impl(ctx):
     env = analysistest.begin(ctx)
     tut = analysistest.target_under_test(env)
 
-    # This is the metadata-generating action. It should depend on metadata for the library and, if generate_metadata is set
-    # also depend on metadata for 'wrapper'.
-    rust_action = [act for act in tut.actions if act.mnemonic == "RustcMetadata"][0]
+    # This is the metadata-generating action (hollow rlib). It should depend on metadata for
+    # the library and, if generate_metadata is set, also depend on metadata for 'wrapper'.
+    # Both actions use mnemonic "Rustc"; find metadata by -hollow.rlib output.
+    rust_action = [
+        act
+        for act in tut.actions
+        if act.mnemonic == "Rustc" and
+           len([o for o in act.outputs.to_list() if o.path.endswith("-hollow.rlib")]) > 0
+    ][0]
 
     metadata_inputs = [i for i in rust_action.inputs.to_list() if i.path.endswith("-hollow.rlib")]
     rlib_inputs = [i for i in rust_action.inputs.to_list() if i.path.endswith(".rlib") and not i.path.endswith("-hollow.rlib")]
@@ -273,22 +304,44 @@ def _rmeta_not_produced_if_pipelining_disabled_test_impl(ctx):
     env = analysistest.begin(ctx)
     tut = analysistest.target_under_test(env)
 
-    rust_action = [act for act in tut.actions if act.mnemonic == "RustcMetadata"]
-    asserts.true(env, len(rust_action) == 0, "expected no metadata to be produced, but found a metadata action")
+    # With disable_pipelining=True, no metadata action should be created.
+    # Since all pipelining actions use mnemonic "Rustc", check for absence of
+    # hollow-rlib or .rmeta outputs instead of checking mnemonic.
+    metadata_actions = [
+        act
+        for act in tut.actions
+        if act.mnemonic == "Rustc" and len([
+            o
+            for o in act.outputs.to_list()
+            if o.path.endswith("-hollow.rlib") or o.path.endswith(".rmeta")
+        ]) > 0
+    ]
+    asserts.true(env, len(metadata_actions) == 0, "expected no metadata to be produced, but found a metadata action")
 
     return analysistest.end(env)
 
 rmeta_not_produced_if_pipelining_disabled_test = analysistest.make(_rmeta_not_produced_if_pipelining_disabled_test_impl, config_settings = ENABLE_PIPELINING)
 
 def _hollow_rlib_env_test_impl(ctx):
-    """Verify RUSTC_BOOTSTRAP=1 is set consistently on both Rustc and RustcMetadata actions.
+    """Verify RUSTC_BOOTSTRAP=1 is set consistently on both metadata and full Rustc actions.
 
     RUSTC_BOOTSTRAP=1 changes the crate hash (SVH), so it must be set on both actions
     to keep the hollow rlib and full rlib SVHs consistent."""
     env = analysistest.begin(ctx)
     tut = analysistest.target_under_test(env)
-    metadata_action = [act for act in tut.actions if act.mnemonic == "RustcMetadata"][0]
-    rlib_action = [act for act in tut.actions if act.mnemonic == "Rustc"][0]
+
+    # Both actions use mnemonic "Rustc"; distinguish by output type.
+    rustc_actions = [act for act in tut.actions if act.mnemonic == "Rustc"]
+    metadata_action = [
+        act
+        for act in rustc_actions
+        if len([o for o in act.outputs.to_list() if o.path.endswith("-hollow.rlib")]) > 0
+    ][0]
+    rlib_action = [
+        act
+        for act in rustc_actions
+        if len([o for o in act.outputs.to_list() if o.path.endswith(".rlib") and not o.path.endswith("-hollow.rlib")]) > 0
+    ][0]
 
     asserts.equals(
         env,
@@ -310,7 +363,7 @@ hollow_rlib_env_test = analysistest.make(_hollow_rlib_env_test_impl, config_sett
 def _worker_pipelining_second_lib_test_impl(ctx):
     """Verify worker pipelining uses .rmeta output (not hollow rlib) for pipelined libs.
 
-    With experimental_worker_pipelining enabled, both the metadata and full actions use
+    With experimental_pipelined_compilation=worker, both the metadata and full actions use
     mnemonic "Rustc" (same mnemonic ensures they share the same worker process and
     PipelineState). They are distinguished by their outputs:
     - Metadata action: produces .rmeta file
@@ -318,11 +371,11 @@ def _worker_pipelining_second_lib_test_impl(ctx):
 
     The metadata action must:
     - Produce a .rmeta file (not -hollow.rlib) — single rustc invocation, no -Zno-codegen
-    - NOT set RUSTC_BOOTSTRAP=1 (no unstable flags needed)
+    - Set RUSTC_BOOTSTRAP=1 (for strategy equivalence with hollow-rlib mode)
     - Take first's .rmeta as input (not first's hollow rlib)
 
     The Rustc (full) action must:
-    - NOT set RUSTC_BOOTSTRAP=1
+    - Set RUSTC_BOOTSTRAP=1 (for strategy equivalence with hollow-rlib mode)
     - Also take first's .rmeta as input (same input set as metadata — no force_depend_on_objects)
     """
     env = analysistest.begin(ctx)
@@ -373,18 +426,18 @@ def _worker_pipelining_second_lib_test_impl(ctx):
         "unexpected -hollow.rlib output (hollow rlib should not be used with worker pipelining): " + str([o.path for o in hollow_outputs]),
     )
 
-    # Neither action should set RUSTC_BOOTSTRAP=1 (no -Zno-codegen needed).
+    # Both actions must set RUSTC_BOOTSTRAP=1 for strategy equivalence with hollow-rlib.
     asserts.equals(
         env,
-        "",
+        "1",
         metadata_action.env.get("RUSTC_BOOTSTRAP", ""),
-        "RUSTC_BOOTSTRAP must not be set with worker pipelining (no -Zno-codegen needed)",
+        "RUSTC_BOOTSTRAP=1 required for strategy equivalence with hollow-rlib mode",
     )
     asserts.equals(
         env,
-        "",
+        "1",
         rlib_action.env.get("RUSTC_BOOTSTRAP", ""),
-        "RUSTC_BOOTSTRAP must not be set with worker pipelining",
+        "RUSTC_BOOTSTRAP=1 required for strategy equivalence with hollow-rlib mode",
     )
 
     # Both actions take first's .rmeta as input (not hollow rlib).
@@ -428,6 +481,144 @@ def _worker_pipelining_test():
         target_compatible_with = _NO_WINDOWS,
     )
     return [":worker_pipelining_second_lib_test"]
+
+# --- Strategy equivalence tests ---
+#
+# These tests assert that hollow-rlib and worker-pipelining modes produce
+# equivalent rustc-visible behavior (same env vars, same --cfg discriminator,
+# same mnemonic). The Bazel invariant requires that switching strategies does
+# not change action output (Julio Merino, "What are Bazel's strategies?").
+
+def _strategy_equivalence_worker_test_impl(ctx):
+    """Assert worker-pipelining actions have unified env/flags for strategy equivalence."""
+    env = analysistest.begin(ctx)
+    tut = analysistest.target_under_test(env)
+
+    # Both actions use mnemonic "Rustc" in worker mode; distinguish by output.
+    rustc_actions = [act for act in tut.actions if act.mnemonic == "Rustc"]
+    metadata_action = [
+        act
+        for act in rustc_actions
+        if len([o for o in act.outputs.to_list() if o.path.endswith(".rmeta")]) > 0
+    ][0]
+    rlib_action = [
+        act
+        for act in rustc_actions
+        if len([
+            o
+            for o in act.outputs.to_list()
+            if o.path.endswith(".rlib") and not o.path.endswith("-hollow.rlib")
+        ]) > 0
+    ][0]
+
+    # RUSTC_BOOTSTRAP=1 must be set on both actions for SVH compatibility
+    # with hollow-rlib mode (RUSTC_BOOTSTRAP changes the crate hash).
+    asserts.equals(
+        env,
+        "1",
+        metadata_action.env.get("RUSTC_BOOTSTRAP", ""),
+        "Strategy equivalence: worker metadata action must have RUSTC_BOOTSTRAP=1",
+    )
+    asserts.equals(
+        env,
+        "1",
+        rlib_action.env.get("RUSTC_BOOTSTRAP", ""),
+        "Strategy equivalence: worker full action must have RUSTC_BOOTSTRAP=1",
+    )
+
+    # Unified --cfg discriminator (not mode-specific).
+    assert_argv_contains(env, metadata_action, "--cfg=rules_rust_pipelined")
+    assert_argv_contains(env, rlib_action, "--cfg=rules_rust_pipelined")
+    assert_argv_contains_not(env, metadata_action, "--cfg=rules_rust_worker_pipelining")
+    assert_argv_contains_not(env, rlib_action, "--cfg=rules_rust_worker_pipelining")
+
+    return analysistest.end(env)
+
+strategy_equivalence_worker_test = analysistest.make(
+    _strategy_equivalence_worker_test_impl,
+    config_settings = ENABLE_WORKER_PIPELINING,
+)
+
+def _strategy_equivalence_hollow_test_impl(ctx):
+    """Assert hollow-rlib actions have unified env/flags and mnemonic for strategy equivalence."""
+    env = analysistest.begin(ctx)
+    tut = analysistest.target_under_test(env)
+
+    # After unification, both modes use mnemonic "Rustc" for metadata.
+    # Find metadata action by output type: has -hollow.rlib output.
+    rustc_actions = [act for act in tut.actions if act.mnemonic == "Rustc"]
+    metadata_actions = [
+        act
+        for act in rustc_actions
+        if len([o for o in act.outputs.to_list() if o.path.endswith("-hollow.rlib")]) > 0
+    ]
+    if len(metadata_actions) == 0:
+        asserts.true(
+            env,
+            False,
+            "Strategy equivalence: hollow-rlib metadata action should use mnemonic 'Rustc', " +
+            "but no Rustc action found with -hollow.rlib output. " +
+            "Actions: " + str([(a.mnemonic, [o.path for o in a.outputs.to_list()]) for a in tut.actions]),
+        )
+        return analysistest.end(env)
+    metadata_action = metadata_actions[0]
+
+    rlib_actions = [
+        act
+        for act in rustc_actions
+        if len([
+            o
+            for o in act.outputs.to_list()
+            if o.path.endswith(".rlib") and not o.path.endswith("-hollow.rlib")
+        ]) > 0
+    ]
+    if len(rlib_actions) == 0:
+        asserts.true(env, False, "Strategy equivalence: no Rustc action with .rlib output found")
+        return analysistest.end(env)
+    rlib_action = rlib_actions[0]
+
+    # RUSTC_BOOTSTRAP=1 (already true for hollow-rlib, but test the invariant).
+    asserts.equals(
+        env,
+        "1",
+        metadata_action.env.get("RUSTC_BOOTSTRAP", ""),
+        "Strategy equivalence: hollow metadata action must have RUSTC_BOOTSTRAP=1",
+    )
+    asserts.equals(
+        env,
+        "1",
+        rlib_action.env.get("RUSTC_BOOTSTRAP", ""),
+        "Strategy equivalence: hollow full action must have RUSTC_BOOTSTRAP=1",
+    )
+
+    # Unified --cfg discriminator (not mode-specific).
+    assert_argv_contains(env, metadata_action, "--cfg=rules_rust_pipelined")
+    assert_argv_contains(env, rlib_action, "--cfg=rules_rust_pipelined")
+    assert_argv_contains_not(env, metadata_action, "--cfg=rules_rust_hollow_rlib")
+    assert_argv_contains_not(env, rlib_action, "--cfg=rules_rust_hollow_rlib")
+
+    return analysistest.end(env)
+
+strategy_equivalence_hollow_test = analysistest.make(
+    _strategy_equivalence_hollow_test_impl,
+    config_settings = ENABLE_PIPELINING,
+)
+
+def _strategy_equivalence_test():
+    strategy_equivalence_worker_test(
+        name = "strategy_equivalence_worker_test",
+        target_under_test = ":second",
+        target_compatible_with = _NO_WINDOWS,
+    )
+    strategy_equivalence_hollow_test(
+        name = "strategy_equivalence_hollow_test",
+        target_under_test = ":second",
+        target_compatible_with = _NO_WINDOWS,
+    )
+    return [
+        ":strategy_equivalence_worker_test",
+        ":strategy_equivalence_hollow_test",
+    ]
 
 def _disable_pipelining_test():
     rust_library(
@@ -495,21 +686,33 @@ def _svh_mismatch_test():
 
     With hollow-rlib pipelining (pipeline=true, worker=false): each library is
     compiled by two separate rustc processes (one with -Zno-codegen for the hollow
-    rlib, one for the full rlib). The -Zno-codegen flag itself does NOT change SVH,
-    but the non-deterministic proc macro runs independently in each process. Because
-    the macro iterates a HashMap with OS-seeded randomness, the two invocations
-    typically produce different token streams and therefore different SVH values.
-    The consumer compiles against the hollow rlib (recording SVH_1); when rustc
-    links against the full rlib (SVH_2), it detects SVH_1 ≠ SVH_2 and fails with
-    E0460. This is expected to FAIL most of the time (~99.2% with 5 HashMap entries).
+    rlib, one for the full rlib). The dependency graph is tier-consistent: the
+    hollow action depends on upstream hollow rlibs and the full action depends on
+    upstream full rlibs. Each tier has self-consistent SVH values, so there is no
+    cross-tier mismatch. The build always succeeds.
 
-    With worker pipelining (pipeline=true, worker=true): each library is compiled
-    by a single rustc process, so the proc macro runs once and SVH is always
-    consistent. The build always succeeds.
+    With worker pipelining under worker execution (pipeline=true, worker=true,
+    --strategy=Rustc=worker): each library is compiled by a single rustc process,
+    so the proc macro runs once and SVH is always consistent. The build always
+    succeeds.
 
-    The test is marked flaky because the SVH mismatch is non-deterministic:
-    on rare occasions (~0.8%) both rustc processes happen to iterate the HashMap
-    in the same order and the build succeeds even without worker pipelining.
+    With worker pipelining under non-worker execution (pipeline=true, worker=true,
+    --strategy=Rustc=sandboxed or local): fast metadata (.rmeta) is used but two
+    separate rustc processes run per crate. Both the metadata and full actions
+    depend on upstream .rmeta (a cross-tier dependency). Separate rustc processes
+    produce different SVHs for the .rmeta and .rlib due to the non-deterministic
+    proc macro. The practical symptoms are:
+    - E0460 (crate found with incompatible SVH) in downstream consumers
+    - E0463 (can't find crate) when rustc fails to match the SVH at all
+    - SVH mismatch diagnostic from process_wrapper's consistency check
+
+    The test is marked flaky because the mismatch is non-deterministic: on rare
+    occasions (~0.8%) both rustc invocations happen to iterate the HashMap in the
+    same order, the SVHs agree, and the build succeeds.
+
+    The full failure boundary is exercised by worker_pipelining_nondeterministic_test.sh
+    which covers all four scenarios: worker+worker, no-pipeline, hollow_rlib, and
+    worker+sandboxed (the failure case).
     """
 
     rust_proc_macro(
@@ -557,6 +760,7 @@ def pipelined_compilation_test_suite(name):
     tests.extend(_custom_rule_test(generate_metadata = True, suffix = "_with_metadata"))
     tests.extend(_custom_rule_test(generate_metadata = False, suffix = "_without_metadata"))
     tests.extend(_svh_mismatch_test())
+    tests.extend(_strategy_equivalence_test())
 
     native.test_suite(
         name = name,

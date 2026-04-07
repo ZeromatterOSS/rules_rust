@@ -111,34 +111,17 @@ def use_real_import_macro():
         build_setting_default = False,
     )
 
-def pipelined_compilation():
-    """When set, this flag enables pipelined compilation for rlib/lib crates.
-
-    For each rlib/lib, a separate RustcMetadata action produces a hollow rlib
-    (via `-Zno-codegen`) containing only metadata. Downstream rlib/lib crates
-    can begin compiling against the hollow rlib before the upstream full codegen
-    action completes, increasing build parallelism.
-
-    Pipelining applies to rlib→rlib dependencies by default. To also pipeline
-    bin/cdylib crates (starting their compile step before upstream full codegen
-    finishes), enable `experimental_use_cc_common_link` alongside this flag.
-    With cc_common.link, rustc only emits `.o` files for binaries (linking is
-    handled separately), so hollow rlib deps are safe for bins too.
-    """
-    bool_flag(
-        name = "pipelined_compilation",
-        build_setting_default = False,
-    )
-
 # buildifier: disable=unnamed-macro
 def experimental_use_cc_common_link():
     """A flag to control whether to link rust_binary and rust_test targets using \
     cc_common.link instead of rustc.
 
-    When combined with `pipelined_compilation`, bin/cdylib crates also participate
-    in the hollow-rlib dependency chain: rustc only emits `.o` files (linking is
-    done by cc_common.link and does not check SVH), so bin compile steps can start
-    as soon as upstream hollow rlibs are ready rather than waiting for full codegen.
+    When combined with `experimental_pipelined_compilation`, bin/cdylib crates also
+    participate in the pipelined dependency chain: rustc only emits `.o` files
+    (linking is done by cc_common.link and does not check SVH), so bin compile
+    steps can start as soon as upstream metadata (hollow rlib or .rmeta) is ready
+    rather than waiting for full codegen. This applies to both hollow_rlib and
+    worker pipelining modes.
     """
     bool_flag(
         name = "experimental_use_cc_common_link",
@@ -564,88 +547,127 @@ def codegen_units():
 def experimental_incremental():
     """A flag to enable incremental compilation for Rust targets.
 
-    When enabled, rustc is invoked with `-Cincremental=/tmp/rules_rust_incremental/<crate_name>`
-    and sandboxing is disabled for Rustc actions so the incremental cache persists between builds.
+    When enabled, rustc is invoked with `-Cincremental=/tmp/rules_rust_incremental/<crate_name>`.
+    Rustc actions run as persistent workers so the incremental cache persists between builds.
 
     This flag is intended for local development builds only. Do not use in CI or release builds
-    as it disables sandboxing and produces non-hermetic outputs.
+    as incremental compilation produces non-hermetic outputs.
 
-    Usage in .bazelrc:
-        build:dev --@rules_rust//rust/settings:experimental_incremental
+    Compatible with worker pipelining and multiplex sandboxing:
+        build:dev --@rules_rust//rust/settings:experimental_pipelined_compilation=worker
+        build:dev --@rules_rust//rust/settings:experimental_incremental=true
+        build:dev --experimental_worker_multiplex_sandboxing
+        build:dev --strategy=Rustc=worker,sandboxed
+
+    Without worker pipelining:
+        build:dev --@rules_rust//rust/settings:experimental_incremental=true
+        build:dev --strategy=Rustc=worker
     """
     bool_flag(
         name = "experimental_incremental",
         build_setting_default = False,
     )
 
-def experimental_worker_pipelining():
-    """A flag to enable worker-managed pipelined compilation.
+def experimental_pipelined_compilation():
+    """Pipelined compilation mode for rlib/lib crates.
 
-    When enabled (alongside pipelined_compilation), the persistent worker uses a single rustc
-    invocation per pipelined rlib/lib crate instead of two. The worker starts rustc with
-    --emit=dep-info,metadata,link, returns the .rmeta file as soon as metadata is ready,
-    and caches the running process so the full compile action can retrieve the .rlib without
-    re-invoking rustc.
+    This is the preferred way to configure pipelining. It replaces the older
+    combination of `pipelined_compilation` (bool) + `experimental_worker_pipelining`
+    (bool). If this flag is set to anything other than "off", it takes precedence
+    over the legacy boolean flags.
 
-    Benefits over the default two-invocation (hollow rlib) approach:
-    - Eliminates SVH mismatch with non-deterministic proc macros (proc macro runs once)
-    - No -Zno-codegen / RUSTC_BOOTSTRAP=1 required
-    - Reduces total rustc invocations by ~50% for pipelined crates
+    The two pipelining modes use different metadata classes:
 
-    Requires pipelined_compilation=true and worker strategy:
-        build --@rules_rust//rust/settings:pipelined_compilation=true
-        build --@rules_rust//rust/settings:experimental_worker_pipelining=true
+    - hollow_rlib uses "full metadata" — a hollow .rlib produced with -Zno-codegen.
+      The dependency graph is tier-consistent (hollow→hollow, full→full), so
+      non-deterministic proc macros never cause SVH mismatch. Compatible with all
+      execution strategies. This is the Buck2-style approach.
+
+    - worker uses "fast metadata" — a .rmeta produced as an early milestone from a
+      single rustc process. Safety depends on keeping one rustc per crate. This is
+      the Cargo-style approach.
+
+    For builds that may use sandboxed, remote, or dynamic execution, or any
+    configuration where metadata and full actions might run as separate processes,
+    hollow_rlib is the recommended portable mode.
+
+    Values:
+
+    off (default):
+        No pipelining. Each crate compiles sequentially after its dependencies
+        finish full codegen.
+
+    hollow_rlib (recommended for portable builds):
+        Each pipelined rlib/lib crate gets two actions: a metadata action that
+        runs rustc with -Zno-codegen to produce a hollow .rlib (full metadata),
+        and a full action that produces the real .rlib. The tier-consistent graph
+        ensures SVH compatibility regardless of execution strategy.
+
+        Compatible with: local, sandboxed, remote, dynamic — all strategies.
+
+        build --@rules_rust//rust/settings:experimental_pipelined_compilation=hollow_rlib
+
+    worker:
+        A persistent multiplex worker runs a single rustc per crate, returning
+        fast metadata (.rmeta) early and finishing the .rlib in the background.
+        Reduces total rustc invocations by ~50%. Requires worker execution
+        strategy; non-worker strategies (sandboxed, local, remote) fall back to
+        running a second rustc, which fails with non-deterministic proc macros
+        due to cross-tier SVH mismatch.
+
+        build --@rules_rust//rust/settings:experimental_pipelined_compilation=worker
         build --strategy=Rustc=worker
 
-    For sandboxed worker pipelining (recommended for hermetic builds):
-        build --@rules_rust//rust/settings:pipelined_compilation=true
-        build --@rules_rust//rust/settings:experimental_worker_pipelining=true
-        build --experimental_worker_multiplex_sandboxing
-        build --strategy=Rustc=worker,sandboxed
+    Both modes set RUSTC_BOOTSTRAP=1 and --cfg=rules_rust_pipelined on all
+    Rustc actions (rlibs, binaries, tests, proc-macros) for SVH consistency.
 
-    For dynamic execution (local worker racing against remote execution):
-        build --@rules_rust//rust/settings:pipelined_compilation=true
-        build --@rules_rust//rust/settings:experimental_worker_pipelining=true
+    Worker mode execution strategy compatibility:
+
+        local:      ✓* (runs a second rustc; nondeterministic proc macros
+                        are detected and fail with a clear diagnostic)
+        sandboxed:  ✓* (same as local)
+        worker:     ✓  (recommended — single rustc via PipelineState)
+        dynamic:    ✓  (local leg uses multiplex sandboxed worker; remote leg
+                        runs standalone — fails fast on SVH mismatch, local
+                        leg wins the race)
+        remote:     ✓* (same as sandboxed)
+
+        * Deterministic proc macros only. Non-deterministic proc macros
+          (those that iterate HashMap/HashSet) will produce an SVH mismatch
+          error with fix suggestions. Use worker strategy or hollow_rlib to
+          support non-deterministic proc macros.
+
+    Recommended configurations:
+
+        # Portable pipelining — safe with all strategies (recommended default):
+        build --@rules_rust//rust/settings:experimental_pipelined_compilation=hollow_rlib
+
+        # Worker pipelining — maximum parallelism for local builds:
+        build --@rules_rust//rust/settings:experimental_pipelined_compilation=worker
+        build --strategy=Rustc=worker
+
+        # Dynamic execution (local worker racing against remote):
+        build --@rules_rust//rust/settings:experimental_pipelined_compilation=worker
         build --experimental_worker_multiplex_sandboxing
-        build --internal_spawn_scheduler
         build --strategy=Rustc=dynamic
         build --dynamic_local_strategy=Rustc=worker,sandboxed
         build --dynamic_remote_strategy=Rustc=remote
 
-    NOTE: The remote leg MUST use actual remote execution (not --dynamic_remote_strategy=
-    Rustc=sandboxed). When the sandboxed leg wins, it produces .rmeta and .rlib from
-    separate rustc invocations, causing SVH mismatch errors in downstream binary targets.
-    With real remote execution, the remote leg runs the action independently and produces
-    consistent artifacts.
-
-    With incremental compilation (compatible with sandboxing):
-        build --@rules_rust//rust/settings:pipelined_compilation=true
-        build --@rules_rust//rust/settings:experimental_worker_pipelining=true
+        # With incremental compilation:
+        build --@rules_rust//rust/settings:experimental_pipelined_compilation=worker
         build --@rules_rust//rust/settings:experimental_incremental=true
         build --experimental_worker_multiplex_sandboxing
         build --strategy=Rustc=worker,sandboxed
 
-    Non-worker fallback behavior:
-        When workers are unavailable and Bazel falls back to local or sandboxed
-        execution, worker pipelining actions run two separate rustc invocations
-        (metadata + full) instead of one. The process_wrapper mitigates this with
-        a no-op optimization: the metadata action's rustc produces the .rlib as a
-        side-effect (via --emit=link); if the .rlib persists on disk (unsandboxed
-        local execution), the full action detects it and skips its own rustc,
-        guaranteeing SVH consistency from a single invocation per crate.
+    To also pipeline bin/cdylib crates, enable `experimental_use_cc_common_link`.
 
-        When the .rlib side-effect is NOT available (sandboxed execution discards
-        undeclared outputs, or the metadata action was an action-cache hit), the
-        full action falls through to running rustc normally. This works correctly
-        for deterministic proc macros (identical inputs produce identical SVH).
-        Nondeterministic proc macros (e.g. HashMap iteration in macro expansion)
-        may produce E0460 (SVH mismatch); the process_wrapper emits a diagnostic
-        directing the user to set experimental_worker_pipelining=false to fall
-        back to hollow-rlib pipelining, which is safe for all execution strategies.
+    See util/process_wrapper/DESIGN.md for the full strategy compatibility
+    matrix and design rationale.
     """
-    bool_flag(
-        name = "experimental_worker_pipelining",
-        build_setting_default = False,
+    string_flag(
+        name = "experimental_pipelined_compilation",
+        build_setting_default = "off",
+        values = ["off", "hollow_rlib", "worker"],
     )
 
 # buildifier: disable=unnamed-macro

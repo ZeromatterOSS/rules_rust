@@ -15,6 +15,17 @@ sh_test(
     ],
 )
 
+################### ARTIFACT HASH INSTRUMENTATION #####################
+sh_test(
+    name = "artifact_hash_check",
+    srcs = ["artifact_hash_check.sh"],
+    tags = [
+        "local",
+        "manual",
+        "no-sandbox",
+    ],
+)
+
 ############################ STRACE TEST #############################
 sh_test(
     name = "strace_rustc_post_metadata_test",

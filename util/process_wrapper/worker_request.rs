@@ -22,7 +22,7 @@ use std::sync::Arc;
 use crate::options::{parse_pw_args, NormalizedRustcMetadata, ParsedPwArgs, SubprocessPipeliningMode};
 
 use super::args::{
-    build_rustc_env, expand_rustc_args_with_metadata, prepare_rustc_args,
+    build_rustc_env, expand_rustc_args_with_metadata, find_out_dir_in_request, prepare_rustc_args,
     resolve_pw_args_for_request, rewrite_expanded_rustc_outputs, scan_pipelining_flags,
     strip_pipelining_flags,
 };
@@ -241,19 +241,27 @@ impl RequestExecutor {
             }
         };
 
+        // Extract the full action's own --out-dir before the match consumes full_args.
+        // This may differ from the metadata action's original_out_dir when subdirectory
+        // isolation is used (e.g. _worker_pipelining/).
+        let full_out_dir = request.base_dir().ok().and_then(|dir| find_out_dir_in_request(&full_args, &dir));
+
         match invocation.wait_for_completion() {
             Ok(completion) => {
+                let dest_out_dir = full_out_dir
+                    .as_ref()
+                    .unwrap_or(&completion.dirs.original_out_dir);
                 if completion.exit_code == 0 {
                     let copy_result = match request.sandbox_dir.as_ref() {
                         Some(dir) => copy_all_outputs_to_sandbox(
                             &completion.dirs.pipeline_output_dir,
                             dir.as_path(),
-                            completion.dirs.original_out_dir.as_str(),
+                            dest_out_dir.as_str(),
                         )
                         .map_err(|e| format!("pipelining: output materialization failed: {e}")),
                         None => copy_outputs_unsandboxed(
                             &completion.dirs.pipeline_output_dir,
-                            completion.dirs.original_out_dir.as_path(),
+                            dest_out_dir.as_path(),
                         ),
                     };
                     if let Err(e) = copy_result {

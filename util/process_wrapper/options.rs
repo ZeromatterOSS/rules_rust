@@ -34,6 +34,9 @@ pub(crate) struct Options {
     pub(crate) pipelining_mode: Option<SubprocessPipeliningMode>,
     // Side-effect `.rlib` used by the standalone full-action no-op path.
     pub(crate) pipelining_rlib_path: Option<String>,
+    // Path to the metadata action's declared `.rmeta` output, used for SVH
+    // mismatch detection when the full action runs standalone (non-worker).
+    pub(crate) pipelining_rmeta_path: Option<String>,
 }
 
 #[derive(Default)]
@@ -239,6 +242,7 @@ pub(crate) fn options_from_args(raw_args: Vec<String>) -> Result<Options, Option
         rustc_output_format,
         pipelining_mode: relocated.pipelining_mode,
         pipelining_rlib_path: relocated.pipelining_rlib_path,
+        pipelining_rmeta_path: relocated.pipelining_rmeta_path,
     })
 }
 
