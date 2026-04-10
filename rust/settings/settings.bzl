@@ -112,18 +112,10 @@ def use_real_import_macro():
     )
 
 def pipelined_compilation():
-    """When set, this flag enables pipelined compilation for rlib/lib crates.
+    """When set, this flag causes rustc to emit `*.rmeta` files and use them for `rlib -> rlib` dependencies.
 
-    For each rlib/lib, a separate RustcMetadata action produces a hollow rlib
-    (via `-Zno-codegen`) containing only metadata. Downstream rlib/lib crates
-    can begin compiling against the hollow rlib before the upstream full codegen
-    action completes, increasing build parallelism.
-
-    Pipelining applies to rlib→rlib dependencies by default. To also pipeline
-    bin/cdylib crates (starting their compile step before upstream full codegen
-    finishes), enable `experimental_use_cc_common_link` alongside this flag.
-    With cc_common.link, rustc only emits `.o` files for binaries (linking is
-    handled separately), so hollow rlib deps are safe for bins too.
+    While this involves one extra (short) rustc invocation to build the rmeta file,
+    it allows library dependencies to be unlocked much sooner, increasing parallelism during compilation.
     """
     bool_flag(
         name = "pipelined_compilation",
@@ -134,11 +126,6 @@ def pipelined_compilation():
 def experimental_use_cc_common_link():
     """A flag to control whether to link rust_binary and rust_test targets using \
     cc_common.link instead of rustc.
-
-    When combined with `pipelined_compilation`, bin/cdylib crates also participate
-    in the hollow-rlib dependency chain: rustc only emits `.o` files (linking is
-    done by cc_common.link and does not check SVH), so bin compile steps can start
-    as soon as upstream hollow rlibs are ready rather than waiting for full codegen.
     """
     bool_flag(
         name = "experimental_use_cc_common_link",
