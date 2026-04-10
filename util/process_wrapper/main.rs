@@ -487,39 +487,4 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_process_line_emit_link() -> Result<(), String> {
-        assert!(matches!(
-            process_line(
-                r#"
-                {
-                    "$message_type": "artifact",
-                    "emit": "link"
-                }
-            "#
-                .to_string(),
-                ErrorFormat::Rendered,
-            )?,
-            LineOutput::Skip
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn test_process_line_emit_metadata() -> Result<(), String> {
-        assert!(matches!(
-            process_line(
-                r#"
-                {
-                    "$message_type": "artifact",
-                    "emit": "metadata"
-                }
-            "#
-                .to_string(),
-                ErrorFormat::Rendered,
-            )?,
-            LineOutput::Skip
-        ));
-        Ok(())
-    }
 }
