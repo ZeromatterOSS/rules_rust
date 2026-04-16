@@ -988,7 +988,8 @@ def construct_arguments(
         inject_allow_features_guardrail = False,
         error_format = None,
         allowed_unstable_rust_features = None,
-        runtime_libs = None):
+        runtime_libs = None,
+        incremental_cache_base = None):
     """Builds an Args object containing common rustc flags
 
     Args:
@@ -1092,6 +1093,9 @@ def construct_arguments(
 
     if allowed_unstable_rust_features != None:
         all_allowed_unstable_features.extend(allowed_unstable_rust_features)
+
+    if incremental_cache_base:
+        process_wrapper_flags.add("--inject-incremental-cache", incremental_cache_base)
 
     # Certain rust build processes expect to find files from the environment
     # variable `$CARGO_MANIFEST_DIR`. Examples of this include pest, tera,
@@ -1729,6 +1733,18 @@ def rustc_compile_action(
         toolchain.channel != "nightly"
     )
 
+    # Check if incremental compilation is enabled. process_wrapper injects
+    # -Cincremental=<output_base>/.rustc_incremental_cache/... when this is on.
+    # Excluded for cc_common.link (emits .o, incompatible) and when there is
+    # no process_wrapper (bootstrap rules).
+    use_incremental = (
+        hasattr(ctx.attr, "_experimental_rustc_incremental") and
+        ctx.attr._experimental_rustc_incremental[BuildSettingInfo].value and
+        not experimental_use_cc_common_link and
+        ctx.executable._process_wrapper != None
+    )
+    incremental_cache_base = ".rustc_incremental_cache" if use_incremental else None
+
     args, env_from_args = construct_arguments(
         ctx = ctx,
         attr = attr,
@@ -1756,6 +1772,7 @@ def rustc_compile_action(
         inject_allow_features_guardrail = inject_allow_features_guardrail,
         allowed_unstable_rust_features = allowed_unstable_rust_features,
         runtime_libs = runtime_libs,
+        incremental_cache_base = incremental_cache_base,
     )
 
     args_metadata = None
@@ -1787,6 +1804,7 @@ def rustc_compile_action(
             inject_allow_features_guardrail = inject_allow_features_guardrail,
             allowed_unstable_rust_features = allowed_unstable_rust_features,
             runtime_libs = runtime_libs,
+            incremental_cache_base = incremental_cache_base,
         )
 
     env = dict(ctx.configuration.default_shell_env)
@@ -1856,6 +1874,8 @@ def rustc_compile_action(
     if not process_wrapper:
         fail("No process wrapper was defined for {}".format(ctx.label))
 
+    incr_tag = " [incr]" if use_incremental else ""
+
     if not toolchain._bootstrapping:
         # Run as normal
         ctx.actions.run(
@@ -1865,11 +1885,12 @@ def rustc_compile_action(
             env = env,
             arguments = args.all,
             mnemonic = "Rustc",
-            progress_message = "Compiling Rust {} %{{label}}{} ({} file{})".format(
+            progress_message = "Compiling Rust {} %{{label}}{} ({} file{}){}".format(
                 crate_info.type,
                 formatted_version,
                 len(srcs),
                 "" if len(srcs) == 1 else "s",
+                incr_tag,
             ),
             toolchain = "@rules_rust//rust:toolchain_type",
             resource_set = get_rustc_resource_set(toolchain),
@@ -1883,11 +1904,12 @@ def rustc_compile_action(
                 env = env,
                 arguments = args_metadata.all,
                 mnemonic = "RustcMetadata",
-                progress_message = "Compiling Rust metadata {} %{{label}}{} ({} file{})".format(
+                progress_message = "Compiling Rust metadata {} %{{label}}{} ({} file{}){}".format(
                     crate_info.type,
                     formatted_version,
                     len(srcs),
                     "" if len(srcs) == 1 else "s",
+                    incr_tag,
                 ),
                 toolchain = "@rules_rust//rust:toolchain_type",
                 execution_requirements = {"supports-path-mapping": ""} if args_metadata.supports_path_mapping else None,
