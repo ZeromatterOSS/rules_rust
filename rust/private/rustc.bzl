@@ -2198,6 +2198,16 @@ def add_crate_link_flags(args, dep_info, force_all_deps_direct = False, use_meta
         format_each = "-Ldependency=%s",
     )
 
+    # Metadata-consuming actions also need -Ldependency pointing at the `_meta/`
+    # subdir for transitive resolution; the full-rlib scan above excludes it by design.
+    if use_metadata:
+        args.add_all(
+            dep_info.transitive_crates,
+            map_each = _get_crate_metadata_dirname,
+            uniquify = True,
+            format_each = "-Ldependency=%s",
+        )
+
 def _crate_to_link_flag_metadata(crate):
     """A helper macro used by `add_crate_link_flags` for adding crate link flags to a Arg object
 
@@ -2250,6 +2260,18 @@ def _get_crate_dirname(crate):
         str: The directory name of the the output File that will be produced.
     """
     return crate.output.dirname
+
+def _get_crate_metadata_dirname(crate):
+    """The directory containing `crate`'s hollow `_meta.rlib`, if any.
+
+    Pipelined libraries emit their hollow rlib to a `_meta/` subdir of the
+    full rlib's directory. Returning that subdir adds an extra `-Ldependency`
+    path for transitive resolution in metadata-using actions. Crates without
+    pipelined metadata return None so no spurious flag is emitted.
+    """
+    if crate.metadata and crate.metadata_supports_pipelining:
+        return crate.metadata.dirname
+    return None
 
 def portable_link_flags(
         lib,
