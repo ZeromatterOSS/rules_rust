@@ -1375,6 +1375,14 @@ def construct_arguments(
         if link_libraries_as_link_args and native_link_crate_type in ["lib", "rlib"]:
             native_link_crate_type = "bin"
 
+        # rustdoc tests compile doctest binaries through rustdoc instead of
+        # rustc. That frontend accepts native libraries as linker args, not
+        # rustc's `-lstatic`/`-ldylib` forms.
+        link_libraries_as_link_args = add_flags_for_binary and include_link_flags and not emit
+        native_link_crate_type = crate_info.type
+        if link_libraries_as_link_args and native_link_crate_type in ["lib", "rlib"]:
+            native_link_crate_type = "bin"
+
         _add_native_link_flags(
             rustc_flags,
             dep_info,
