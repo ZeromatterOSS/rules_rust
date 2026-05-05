@@ -3,7 +3,7 @@
 load("@bazel_features//:features.bzl", "bazel_features")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
-load("//private/3rdparty/crates:crates.bzl", "crate_repositories")
+load("//extensions/prost/private/3rdparty/crates:crates.bzl", "crate_repositories")
 
 def _rust_ext_impl(module_ctx):
     direct_deps = []
@@ -18,7 +18,7 @@ def _rust_ext_impl(module_ctx):
         type = "tar.gz",
         urls = ["https://static.crates.io/crates/heck/heck-0.5.0.crate"],
         strip_prefix = "heck-0.5.0",
-        build_file = Label("@rules_rust_prost//private/3rdparty/crates:BUILD.heck-0.5.0.bazel"),
+        build_file = Label("//extensions/prost/private/3rdparty/crates:BUILD.heck-0.5.0.bazel"),
     )
 
     # is_dev_dep is ignored here. It's not relevant for internal_deps, as dev

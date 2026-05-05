@@ -49,8 +49,8 @@ crates_vendor(
 bzl_library(
     name = "bzl_lib",
     srcs = [
-        "//private/3rdparty/crates:crates.bzl",
-        "//private/3rdparty/crates:defs.bzl",
+        "//extensions/prost/private/3rdparty/crates:crates.bzl",
+        "//extensions/prost/private/3rdparty/crates:defs.bzl",
     ],
-    visibility = ["//private:__pkg__"],
+    visibility = ["//extensions/prost/private:__pkg__"],
 )
