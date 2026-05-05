@@ -1360,9 +1360,6 @@ _ANNOTATION_SELECT_ATTRS = {
     "build_script_proc_macro_deps": _relative_label_list(
         doc = "A list of labels to add to a crate's `cargo_build_script::proc_macro_deps` attribute.",
     ),
-    "build_script_rundir": attr.string(
-        doc = "An override for the build script's rundir attribute.",
-    ),
     "build_script_rustc_env": attr.string_dict(
         doc = "Additional environment variables to set on a crate's `cargo_build_script::env` attribute.",
     ),

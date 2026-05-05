@@ -21,7 +21,7 @@ use crate::splicing::default_splicing_package_crate_id;
 use crate::utils::starlark::{
     self, Alias, CargoBuildScript, CargoTomlEnvVars, CommonAttrs, Data, ExportsFiles, Filegroup,
     Glob, Label, Load, Package, RustBinary, RustLibrary, RustProcMacro, SelectDict, SelectList,
-    SelectScalar, SelectSet, Starlark, TargetCompatibleWith,
+    SelectSet, Starlark, TargetCompatibleWith,
 };
 use crate::utils::target_triple::TargetTriple;
 use crate::utils::{self, sanitize_repository_name};
@@ -623,10 +623,6 @@ impl Renderer {
                         .map(|attrs| attrs.extra_proc_macro_deps.clone())
                         .unwrap_or_default(),
                 ),
-                platforms,
-            ),
-            rundir: SelectScalar::new(
-                attrs.map(|attrs| attrs.rundir.clone()).unwrap_or_default(),
                 platforms,
             ),
             rustc_env: SelectDict::new(

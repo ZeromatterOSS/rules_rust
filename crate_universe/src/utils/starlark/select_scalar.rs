@@ -76,10 +76,6 @@ where
         }
     }
 
-    /// Determine whether or not the select should be serialized
-    pub(crate) fn is_empty(&self) -> bool {
-        self.common.is_none() && self.selects.is_empty() && self.unmapped.is_empty()
-    }
 }
 
 impl<T> Serialize for SelectScalar<T>

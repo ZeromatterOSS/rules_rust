@@ -20,7 +20,6 @@ pub(crate) use label::*;
 pub(crate) use select::*;
 pub(crate) use select_dict::*;
 pub(crate) use select_list::*;
-pub(crate) use select_scalar::*;
 pub(crate) use select_set::*;
 pub(crate) use target_compatible_with::*;
 
@@ -122,8 +121,6 @@ pub(crate) struct CargoBuildScript {
     pub(crate) pkg_name: Option<String>,
     #[serde(skip_serializing_if = "SelectSet::is_empty")]
     pub(crate) proc_macro_deps: SelectSet<Label>,
-    #[serde(skip_serializing_if = "SelectScalar::is_empty")]
-    pub(crate) rundir: SelectScalar<String>,
     #[serde(skip_serializing_if = "SelectDict::is_empty")]
     pub(crate) rustc_env: SelectDict<String, String>,
     #[serde(skip_serializing_if = "SelectSet::is_empty")]

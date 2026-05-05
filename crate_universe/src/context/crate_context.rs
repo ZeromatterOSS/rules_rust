@@ -236,9 +236,6 @@ pub(crate) struct BuildScriptAttributes {
     pub(crate) exec_properties: Select<BTreeMap<String, String>>,
 
     #[serde(skip_serializing_if = "Select::is_empty")]
-    pub(crate) rundir: Select<String>,
-
-    #[serde(skip_serializing_if = "Select::is_empty")]
     pub(crate) extra_proc_macro_deps: Select<BTreeSet<Label>>,
 
     #[serde(skip_serializing_if = "Select::is_empty")]
@@ -284,7 +281,6 @@ impl Default for BuildScriptAttributes {
             build_script_env: Default::default(),
             build_script_env_files: Default::default(),
             exec_properties: Default::default(),
-            rundir: Default::default(),
             extra_proc_macro_deps: Default::default(),
             proc_macro_deps: Default::default(),
             rustc_env: Default::default(),
@@ -714,9 +710,6 @@ impl CrateContext {
                     attrs.use_default_shell_env = Some(*extra);
                 }
 
-                if let Some(rundir) = &crate_extra.build_script_rundir {
-                    attrs.rundir = Select::merge(attrs.rundir.clone(), rundir.clone());
-                }
             }
 
             // Extra build contents

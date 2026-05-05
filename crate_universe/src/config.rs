@@ -338,9 +338,6 @@ pub(crate) struct CrateAnnotations {
     /// [use_default_shell_env](https://bazelbuild.github.io/rules_rust/cargo.html#cargo_build_script-use_default_shell_env) attribute.
     pub(crate) build_script_use_default_shell_env: Option<i32>,
 
-    /// Directory to run the crate's build script in. If not set, will run in the manifest directory, otherwise a directory relative to the exec root.
-    pub(crate) build_script_rundir: Option<Select<String>>,
-
     /// A scratch pad used to write arbitrary text to target BUILD files.
     pub(crate) additive_build_file_content: Option<String>,
 
@@ -437,7 +434,6 @@ impl Add for CrateAnnotations {
             build_script_exec_properties: select_merge(self.build_script_exec_properties, rhs.build_script_exec_properties),
             build_script_toolchains: joined_extra_member!(self.build_script_toolchains, rhs.build_script_toolchains, BTreeSet::new, BTreeSet::extend),
             build_script_use_default_shell_env: self.build_script_use_default_shell_env.or(rhs.build_script_use_default_shell_env),
-            build_script_rundir: self.build_script_rundir.or(rhs.build_script_rundir),
             additive_build_file_content: joined_extra_member!(self.additive_build_file_content, rhs.additive_build_file_content, String::new, concat_string),
             shallow_since: self.shallow_since.or(rhs.shallow_since),
             patch_args: joined_extra_member!(self.patch_args, rhs.patch_args, Vec::new, Vec::extend),
@@ -488,7 +484,6 @@ pub(crate) struct AnnotationsProvidedByPackage {
     pub(crate) rustc_flags: Option<Select<Vec<String>>>,
     pub(crate) build_script_env: Option<Select<BTreeMap<String, String>>>,
     pub(crate) build_script_rustc_env: Option<Select<BTreeMap<String, String>>>,
-    pub(crate) build_script_rundir: Option<Select<String>>,
     pub(crate) additive_build_file_content: Option<String>,
     pub(crate) extra_aliased_targets: Option<BTreeMap<String, String>>,
 }
@@ -512,7 +507,6 @@ impl CrateAnnotations {
             rustc_flags,
             build_script_env,
             build_script_rustc_env,
-            build_script_rundir,
             additive_build_file_content,
             extra_aliased_targets,
         } = match AnnotationsProvidedByPackage::deserialize(&pkg_metadata["bazel"]) {
@@ -547,7 +541,6 @@ impl CrateAnnotations {
         default(&mut self.rustc_flags, rustc_flags);
         default(&mut self.build_script_env, build_script_env);
         default(&mut self.build_script_rustc_env, build_script_rustc_env);
-        default(&mut self.build_script_rundir, build_script_rundir);
         default(
             &mut self.additive_build_file_content,
             additive_build_file_content,
