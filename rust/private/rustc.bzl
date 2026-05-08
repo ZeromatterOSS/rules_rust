@@ -1800,6 +1800,34 @@ def rustc_compile(
         rust_toolchain.channel != "nightly"
     )
 
+    # Build the env snapshot used to detect a user-managed RUSTC_BOOTSTRAP before
+    # any rules_rust-injected values are added. Matches the merge order in the
+    # main env assembly below.
+    env_before_inject = dict(ctx.configuration.default_shell_env)
+    env_before_inject.update(crate_info.rustc_env)
+    if hasattr(ctx.attr, "_extra_rustc_env") and not is_exec_configuration(ctx):
+        env_before_inject.update(
+            ctx.attr._extra_rustc_env[ExtraRustcEnvInfo].extra_rustc_env,
+        )
+
+    collected_extra_flags = collect_extra_rustc_flags(
+        ctx,
+        toolchain,
+        crate_info.root,
+        crate_info.type,
+    )
+
+    user_manages_bootstrap = _user_manages_bootstrap(
+        ctx,
+        attr,
+        env_before_inject,
+        collected_extra_flags,
+    )
+    inject_allow_features_guardrail = (
+        not user_manages_bootstrap and
+        toolchain.channel != "nightly"
+    )
+
     args, env_from_args = construct_arguments(
         ctx = ctx,
         attr = attr,
