@@ -201,15 +201,26 @@ pub(crate) fn resolve_cache_base(arg: &str) -> PathBuf {
 /// Bazel writes `DO_NOT_BUILD_HERE` into every output_base as a sentinel that
 /// prevents users from accidentally treating it as a workspace. Its presence
 /// is a reliable, Bazel-maintained signal that a directory is an output_base.
-fn find_output_base(start: &Path) -> Option<PathBuf> {
+pub(crate) fn find_output_base(start: &Path) -> Option<PathBuf> {
+    // Bazel writes `DO_NOT_BUILD_HERE` into both the output_base and the
+    // intermediate `execroot/` directory on some platforms (notably Windows
+    // with Bazel ≥ 9.0.1). The output_base is the one we want for computing
+    // exec_root; prefer an ancestor whose basename is not `execroot`, and
+    // fall back to the closest matching ancestor only if none qualify.
+    let mut fallback: Option<PathBuf> = None;
     let mut cur: Option<&Path> = Some(start);
     while let Some(d) = cur {
         if d.join("DO_NOT_BUILD_HERE").is_file() {
-            return Some(d.to_path_buf());
+            if d.file_name().and_then(|n| n.to_str()) != Some("execroot") {
+                return Some(d.to_path_buf());
+            }
+            if fallback.is_none() {
+                fallback = Some(d.to_path_buf());
+            }
         }
         cur = d.parent();
     }
-    None
+    fallback
 }
 
 /// Compute the cache directory for a rustc invocation without creating it.
