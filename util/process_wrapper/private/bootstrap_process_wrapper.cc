@@ -2,10 +2,12 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #if defined(_WIN32)
+#include <windows.h>
 #include <direct.h>
 #include <process.h>
 #include <sys/stat.h>
@@ -33,6 +35,21 @@ bool is_directory(const std::string& path) {
   return stat(path.c_str(), &stat_buffer) == 0 &&
          (stat_buffer.st_mode & S_IFDIR) != 0;
 }
+
+#if defined(_WIN32)
+bool is_symlink(const std::string& path) {
+  DWORD attrs = GetFileAttributesA(path.c_str());
+  if (attrs == INVALID_FILE_ATTRIBUTES) {
+    return false;
+  }
+  return (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+#else
+bool is_symlink(const std::string& path) {
+  struct stat stat_buffer;
+  return lstat(path.c_str(), &stat_buffer) == 0 && S_ISLNK(stat_buffer.st_mode);
+}
+#endif
 
 std::string dirname(const std::string& path) {
   std::string::size_type slash = path.find_last_of("/\\");
@@ -100,8 +117,14 @@ std::string replace_placeholders(const std::string& arg,
 }
 
 std::string get_output_base(const std::string& pwd) {
+  // The traditional Bazel layout has `external` as a symlink whose target's
+  // parent is the output base. Newer Windows layouts (Bazel >= 9.0.1) place
+  // a real `external` directory inside execroot instead, in which case
+  // canonicalizing `external/..` yields `pwd` (the execroot), not the output
+  // base. Only trust the symlink path; otherwise derive output_base from
+  // `pwd`'s grandparent (`<output_base>/execroot/<ws>` → `<output_base>`).
   const std::string external = join_path(pwd, "external");
-  if (is_directory(external)) {
+  if (is_symlink(external)) {
     return canonicalize(join_path(external, ".."));
   }
   return dirname(dirname(canonicalize(pwd)));
@@ -181,6 +204,7 @@ int main(int argc, char** argv) {
       c = '\\';
     }
   }
+  rewrite_response_files(command_args, pwd);
 #endif
 
   std::vector<char*> exec_argv = build_exec_argv(command_args);

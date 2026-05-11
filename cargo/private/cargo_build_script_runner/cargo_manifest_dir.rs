@@ -27,10 +27,17 @@ pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
     std::fs::remove_file(path)
 }
 
-/// Create a symlink file on windows systems
+/// Remove a symlink on Windows. `Path::is_dir` follows symlinks, so it
+/// misreports directory symlinks with missing targets (e.g. Bazel's
+/// `local-spawn-runner.*` sandboxes that are cleaned up before this runs)
+/// as non-directories, and `remove_file` on a directory reparse point fails
+/// with ACCESS_DENIED. Use `symlink_metadata` to inspect the link itself.
 #[cfg(target_family = "windows")]
 pub fn remove_symlink(path: &Path) -> Result<(), std::io::Error> {
-    if path.is_dir() {
+    use std::os::windows::fs::FileTypeExt;
+    let metadata = std::fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink_dir() || (file_type.is_dir() && !file_type.is_symlink()) {
         std::fs::remove_dir(path)
     } else {
         std::fs::remove_file(path)
