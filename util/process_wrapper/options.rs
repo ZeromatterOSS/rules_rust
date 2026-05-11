@@ -161,23 +161,36 @@ pub(crate) fn options() -> Result<Options, OptionError> {
     // strip the sandbox cwd prefix from paths embedded in rmeta/debuginfo.
     // Leaving ${output_base} untouched preserves that behavior.
     let output_base = {
+        // Historically `execroot/<ws>/external` is a symlink whose canonical
+        // path leads to `<output_base>/external`; taking its parent gives
+        // `<output_base>`. On newer Bazel Windows layouts (≥ 9.0.1),
+        // `external` is a real directory inside execroot containing per-repo
+        // symlinks instead, so canonicalizing it returns the original
+        // execroot-relative path and `.parent()` would yield `execroot/<ws>`
+        // — the wrong answer. Only trust the `external` path when it's a
+        // symlink; otherwise derive output_base from `current_dir`'s
+        // grandparent (`<output_base>/execroot/<ws>` → `<output_base>`).
         let external = std::path::Path::new(&current_dir).join("external");
-        match std::fs::canonicalize(external) {
-            Ok(canonical) => canonical
-                .parent()
-                .and_then(|p| p.to_str())
-                .unwrap_or(&current_dir)
-                .to_owned(),
-            Err(_) => match std::fs::canonicalize(&current_dir) {
+        let external_is_symlink = std::fs::symlink_metadata(&external)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        let from_external = if external_is_symlink {
+            std::fs::canonicalize(&external)
+                .ok()
+                .and_then(|c| c.parent().and_then(|p| p.to_str()).map(|s| s.to_owned()))
+        } else {
+            None
+        };
+        from_external
+            .or_else(|| match std::fs::canonicalize(&current_dir) {
                 Ok(canonical) => canonical
                     .parent()
                     .and_then(|p| p.parent())
                     .and_then(|p| p.to_str())
-                    .unwrap_or(&current_dir)
-                    .to_owned(),
-                Err(_) => current_dir.clone(),
-            },
-        }
+                    .map(|s| s.to_owned()),
+                Err(_) => None,
+            })
+            .unwrap_or_else(|| current_dir.clone())
     };
 
     // ${exec_root} resolves to Bazel's real execroot, sandbox-invariant across
