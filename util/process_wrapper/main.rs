@@ -96,6 +96,20 @@ impl TemporaryDirectoryGuard {
     }
 }
 
+/// Returns true if `name` looks like a rustc atomic-rename temp file
+/// (`<base>.tmp<hex>`). rustc writes outputs to a tempfile and renames on
+/// success; the temp file is open exclusively while in flight, which causes
+/// "Access is denied" on Windows when a sibling action's dependency-dir scan
+/// tries to copy it. These files are never valid link inputs.
+#[cfg(windows)]
+fn is_rustc_tempfile_suffix(file_name_lower: &str) -> bool {
+    let Some(idx) = file_name_lower.rfind(".tmp") else {
+        return false;
+    };
+    let suffix = &file_name_lower[idx + 4..];
+    !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 #[cfg(windows)]
 fn get_dependency_search_paths_from_args(
     initial_args: &[String],
@@ -225,6 +239,15 @@ fn consolidate_dependency_search_paths(
                 || file_name_lower.ends_with(".rcgu.bc")
                 || file_name_lower.ends_with(".rcgu.bc.z")
             {
+                continue;
+            }
+
+            // Skip rustc atomic-rename temp files. rustc writes outputs as
+            // `<final>.tmp<hex>` and renames to `<final>` on success; on
+            // Windows the file is open exclusively while in flight, so a
+            // sibling action trying to copy it gets "Access is denied".
+            // These temp files are never valid link dependencies regardless.
+            if is_rustc_tempfile_suffix(&file_name_lower) {
                 continue;
             }
             if !seen.insert(file_name_lower) {
@@ -529,4 +552,20 @@ mod test {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_is_rustc_tempfile_suffix() {
+        assert!(is_rustc_tempfile_suffix("foo.exe.tmpa7861a9"));
+        assert!(is_rustc_tempfile_suffix("foo-tests.exe.tmp2f1d657"));
+        assert!(is_rustc_tempfile_suffix("foo.dll.tmpabcdef0"));
+        assert!(is_rustc_tempfile_suffix("foo.lib.tmp1234567"));
+        assert!(is_rustc_tempfile_suffix("foo.pdb.tmpdeadbee"));
+        assert!(!is_rustc_tempfile_suffix("foo.rlib"));
+        assert!(!is_rustc_tempfile_suffix("foo.rmeta"));
+        assert!(!is_rustc_tempfile_suffix("foo.exe"));
+        assert!(!is_rustc_tempfile_suffix("foo.dll"));
+        // ".tmp" alone or with non-hex suffix is not a rustc atomic-rename temp file.
+        assert!(!is_rustc_tempfile_suffix("foo.tmp"));
+        assert!(!is_rustc_tempfile_suffix("foo.tmp.bak"));
+    }
 }
