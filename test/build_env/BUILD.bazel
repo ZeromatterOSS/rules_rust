@@ -7,6 +7,14 @@ rust_test(
     edition = "2018",
 )
 
+rust_test(
+    name = "cargo_pkg_env_test",
+    srcs = ["tests/custom_crate_name.rs"],
+    crate_name = "custom_crate_name",
+    edition = "2018",
+    version = "1.2.3",
+)
+
 rust_library(
     name = "arbitrary_env_lib",
     srcs = ["tests/arbitrary_env_lib.rs"],

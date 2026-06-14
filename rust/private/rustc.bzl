@@ -121,6 +121,9 @@ def _get_rustc_env(attr, toolchain, crate_name):
         "CARGO_CFG_TARGET_ARCH": "" if toolchain.target_arch == None else toolchain.target_arch,
         "CARGO_CFG_TARGET_OS": "" if toolchain.target_os == None else toolchain.target_os,
         "CARGO_CRATE_NAME": crate_name,
+        # CARGO_PKG_NAME and CARGO_PKG_VERSION are commonly needed by clap derive macros.
+        "CARGO_PKG_NAME": attr.name,
+        "CARGO_PKG_VERSION": getattr(attr, "version", "0.0.0"),
     }
     return result
 
