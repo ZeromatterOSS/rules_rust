@@ -14,6 +14,7 @@ load(
     "legacy_cc_toolchain_test",
     "libpath_absolute_test",
     "libpath_relative_test",
+    "libtool_fallback_test",
     "resource_dir_absolute_test",
     "resource_dir_relative_test",
     "sysroot_absolute_test",
@@ -46,6 +47,8 @@ fsanitize_ignorelist_absolute_test(name = "fsanitize_ignorelist_absolute_test")
 fsanitize_ignorelist_relative_test(name = "fsanitize_ignorelist_relative_test")
 
 legacy_cc_toolchain_test(name = "legacy_cc_toolchain_test")
+
+libtool_fallback_test(name = "libtool_fallback_test")
 
 libpath_absolute_test(name = "libpath_absolute_test")
 
