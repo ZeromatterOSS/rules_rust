@@ -192,6 +192,7 @@ def collect_deps(
 
     direct_crate_outputs = []
     transitive_crate_outputs = []
+    transitive_proc_macro_dep_outputs = []
 
     direct_metadata_outputs = []
     transitive_metadata_outputs = []
@@ -257,6 +258,8 @@ def collect_deps(
             direct_crate_outputs.append(crate_info.output)
             if not is_proc_macro:
                 transitive_crate_outputs.append(dep_info.transitive_crate_outputs)
+            else:
+                transitive_proc_macro_dep_outputs.append(dep_info.transitive_crate_outputs)
 
             if not is_proc_macro:
                 transitive_noncrates.append(dep_info.transitive_noncrates)
@@ -301,6 +304,9 @@ def collect_deps(
             transitive_crate_outputs = depset(
                 direct_crate_outputs,
                 transitive = transitive_crate_outputs,
+            ),
+            transitive_proc_macro_dep_outputs = depset(
+                transitive = transitive_proc_macro_dep_outputs,
             ),
             transitive_metadata_outputs = depset(
                 direct_metadata_outputs,
@@ -765,6 +771,16 @@ def collect_inputs(
     transitive_crate_outputs = dep_info.transitive_crate_outputs
     if _depend_on_metadata(crate_info, force_depend_on_objects):
         transitive_crate_outputs = dep_info.transitive_metadata_outputs
+
+    # Proc-macro link actions invoke the linker against all transitively-reachable
+    # rlibs, including those that come through proc-macro dep chains. Under
+    # --remote_download_outputs=minimal, only declared action inputs are downloaded,
+    # so we must include them here even though they're excluded from the normal
+    # transitive_crate_outputs (which non-proc-macro callers don't need).
+    if _is_proc_macro(crate_info):
+        transitive_crate_outputs = depset(
+            transitive = [transitive_crate_outputs, dep_info.transitive_proc_macro_dep_outputs],
+        )
 
     nolinkstamp_compile_direct_inputs = []
     if build_info:
