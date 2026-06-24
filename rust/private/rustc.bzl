@@ -260,6 +260,7 @@ def collect_deps(
                 transitive_crate_outputs.append(dep_info.transitive_crate_outputs)
             else:
                 transitive_proc_macro_dep_outputs.append(dep_info.transitive_crate_outputs)
+                transitive_proc_macro_dep_outputs.append(dep_info.transitive_proc_macro_dep_outputs)
 
             if not is_proc_macro:
                 transitive_noncrates.append(dep_info.transitive_noncrates)
