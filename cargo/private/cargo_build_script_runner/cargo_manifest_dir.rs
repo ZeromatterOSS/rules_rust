@@ -635,4 +635,65 @@ mod tests {
         let contents = fs::read_to_string(file_path).unwrap();
         assert_eq!(contents, "inside world");
     }
+
+    /// Reproduces the Build-without-the-Bytes failure observed in CI when a
+    /// build script (e.g. `clang-sys`, `links = "clang"`) declares a retained
+    /// `links` runfile such as `libclang.so`.
+    ///
+    /// Under `--remote_download_outputs=minimal`, that runfile's source is a
+    /// remote-only output that Bazel never materializes on the local disk:
+    /// `create_runfiles_dir` lays down a dangling symlink to it, and
+    /// `drain_runfiles_dir` then removes the symlink and `fs::copy`s the
+    /// (absent) source into place to retain it. The copy fails with
+    /// `NotFound`, surfacing in CI as:
+    ///
+    /// ```text
+    /// called `Result::unwrap()` on an `Err` value:
+    ///   "Failed to copy `.../clang/libclang.so -> .../_bs.crf/.../libclang.so`
+    ///    with Os { code: 2, kind: NotFound, ... }"
+    /// ```
+    ///
+    /// The retained-runfile path therefore assumes the source exists locally,
+    /// which does not hold when the source is only present in the remote CAS.
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn drain_retained_runfile_fails_when_source_is_remote_only() {
+        let test_tmp = PathBuf::from(std::env::var("TEST_TMPDIR").unwrap());
+        let output_dir = test_tmp.join("drain_remote_only_out");
+        fs::create_dir_all(&output_dir).unwrap();
+
+        // A source path that does not exist on the local filesystem, standing
+        // in for an output Bazel left remote-only under Build-without-the-Bytes.
+        let remote_only_src = test_tmp.join("remote-only").join("libclang.so");
+        assert!(!remote_only_src.exists());
+
+        let mut runfiles = BTreeMap::new();
+        runfiles.insert(
+            remote_only_src.clone(),
+            RlocationPath::from("clang/libclang.so"),
+        );
+
+        let maker = RunfilesMaker {
+            output_dir: output_dir.clone(),
+            // Retain `*.so` so drain copies the source into place (the failing
+            // path) rather than simply deleting the runfile.
+            filename_suffixes_to_retain: BTreeSet::from([".so".to_owned()]),
+            runfiles,
+        };
+
+        // Mirror a real action: lay down the runfiles tree (a dangling symlink,
+        // since the source is remote-only), then tear it down.
+        maker.create_runfiles_dir().unwrap();
+        assert!(output_dir.join("clang/libclang.so").is_symlink());
+
+        let err = maker
+            .drain_runfiles_dir(&output_dir)
+            .expect_err("draining a retained, remote-only runfile must fail");
+
+        assert!(
+            err.contains("Failed to copy") && err.contains("libclang.so"),
+            "expected a copy failure for the remote-only source, got: {}",
+            err
+        );
+    }
 }
