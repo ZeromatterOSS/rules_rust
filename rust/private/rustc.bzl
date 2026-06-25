@@ -255,8 +255,7 @@ def collect_deps(
                 transitive_metadata_outputs.append(dep_info.transitive_metadata_outputs)
 
             direct_crate_outputs.append(crate_info.output)
-            if not is_proc_macro:
-                transitive_crate_outputs.append(dep_info.transitive_crate_outputs)
+            transitive_crate_outputs.append(dep_info.transitive_crate_outputs)
 
             if not is_proc_macro:
                 transitive_noncrates.append(dep_info.transitive_noncrates)
@@ -682,7 +681,6 @@ def collect_inputs(
         experimental_use_cc_common_link = False,
         include_link_flags = True,
         force_link_inputs = False,
-        include_proc_macro_dep_crate_outputs = False,
         runtime_libs = None):
     """Gather's the inputs and required input information for a rustc action
 
@@ -708,8 +706,6 @@ def collect_inputs(
         include_link_flags (bool, optional): Whether to include flags like `-l` that instruct the linker to search for a library.
         force_link_inputs (bool, optional): Whether to collect linker inputs even when the crate type would
             normally be handled as a non-linking compile action.
-        include_proc_macro_dep_crate_outputs (bool, optional): Whether to collect transitive crate outputs
-            from direct proc-macro dependencies of a proc-macro crate.
         runtime_libs (depset[File], optional): Runtime libraries from the C++ toolchain
             selected for `crate_info.type`.
 
@@ -768,16 +764,6 @@ def collect_inputs(
     transitive_crate_outputs = dep_info.transitive_crate_outputs
     if _depend_on_metadata(crate_info, force_depend_on_objects):
         transitive_crate_outputs = dep_info.transitive_metadata_outputs
-
-    if include_proc_macro_dep_crate_outputs and _is_proc_macro(crate_info):
-        proc_macro_dep_crate_outputs = [
-            dep.dep_info.transitive_crate_outputs
-            for dep in crate_info.proc_macro_deps.to_list()
-            if dep.dep_info
-        ]
-        transitive_crate_outputs = depset(
-            transitive = [transitive_crate_outputs] + proc_macro_dep_crate_outputs,
-        )
 
     nolinkstamp_compile_direct_inputs = []
     if build_info:
@@ -1748,7 +1734,6 @@ def rustc_compile(
         lint_files = lint_files,
         stamp = stamp,
         experimental_use_cc_common_link = use_cc_common_link,
-        include_proc_macro_dep_crate_outputs = True,
         runtime_libs = runtime_libs,
     )
 

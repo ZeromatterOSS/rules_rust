@@ -1,7 +1,7 @@
 """Unittest to verify proc-macro targets"""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
-load("//rust:defs.bzl", "rust_library", "rust_proc_macro", "rust_test")
+load("//rust:defs.bzl", "rust_binary", "rust_library", "rust_proc_macro", "rust_test")
 
 def _get_toolchain(ctx):
     return ctx.attr._toolchain[platform_common.ToolchainInfo]
@@ -18,12 +18,17 @@ def _proc_macro_does_not_leak_deps_impl(ctx):
 
     asserts.false(env, rustc_action == None)
 
-    # Our test target has a dependency on "proc_macro_dep" via a rust_proc_macro target,
-    # so the proc_macro_dep rlib should not appear as an input to the Rustc action, nor as -Ldependency on the command line.
-    proc_macro_dep_inputs = [i for i in rustc_action.inputs.to_list() if "proc_macro_dep" in i.path]
+    # Linking actions receive the Cargo Artifact::All closure as inputs, including
+    # rlibs hidden behind proc-macro dependencies. Those hidden crates still must
+    # not become direct rustc arguments.
+    proc_macro_dep_inputs = [
+        i
+        for i in rustc_action.inputs.to_list()
+        if i.basename.startswith("libproc_macro_dep-") and i.extension == "rlib"
+    ]
     proc_macro_dep_args = [arg for arg in rustc_action.argv if "proc_macro_dep" in arg]
 
-    asserts.equals(env, 0, len(proc_macro_dep_inputs))
+    asserts.equals(env, 1, len(proc_macro_dep_inputs))
     asserts.equals(env, 0, len(proc_macro_dep_args))
 
     # Our test target depends on proc_macro_dep:native directly, as well as transitively through the
@@ -179,9 +184,21 @@ def _direct_proc_macro_dep_outputs_are_inputs_test():
         deps = [":proc_macro_definition"],
     )
 
+    rust_binary(
+        name = "cargo_artifact_closure",
+        srcs = ["leaks_deps/cargo_artifact_closure.rs"],
+        edition = "2018",
+        proc_macro_deps = [":proc_macro_uses_proc_macro"],
+    )
+
     direct_proc_macro_dep_outputs_are_inputs_test(
         name = "direct_proc_macro_dep_outputs_are_inputs_test",
         target_under_test = ":proc_macro_uses_proc_macro",
+    )
+
+    direct_proc_macro_dep_outputs_are_inputs_test(
+        name = "nested_proc_macro_dep_outputs_are_inputs_test",
+        target_under_test = ":cargo_artifact_closure",
     )
 
 direct_proc_macro_dep_outputs_are_inputs_test = analysistest.make(
@@ -202,6 +219,7 @@ def proc_macro_does_not_leak_deps_test_suite(name):
         name = name,
         tests = [
             ":direct_proc_macro_dep_outputs_are_inputs_test",
+            ":nested_proc_macro_dep_outputs_are_inputs_test",
             ":proc_macro_does_not_leak_deps_test",
             ":proc_macro_does_not_leak_lib_deps_test",
         ],

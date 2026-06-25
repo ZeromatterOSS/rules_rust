@@ -60,7 +60,7 @@ DepInfo = provider(
         "direct_crates": "depset[AliasableDepInfo]",
         "link_search_path_files": "depset[File]: All transitive files containing search paths to pass to the linker",
         "transitive_build_infos": "depset[BuildInfo]",
-        "transitive_crate_outputs": "depset[File]: Direct crate outputs and transitive crate outputs reachable through non-proc-macro dependency chains.",
+        "transitive_crate_outputs": "depset[File]: Direct crate outputs and recursively reachable crate outputs for linking actions.",
         "transitive_crates": "depset[CrateInfo]",
         "transitive_data": "depset[File]: Data of all transitive non-macro dependencies.",
         "transitive_metadata_outputs": "depset[File]: All transitive metadata dependencies (.rmeta, for crates that provide them) and all transitive object dependencies (.rlib) for crates that don't provide metadata.",
