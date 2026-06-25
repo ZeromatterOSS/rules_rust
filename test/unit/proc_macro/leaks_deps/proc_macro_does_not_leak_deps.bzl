@@ -148,7 +148,7 @@ proc_macro_does_not_leak_lib_deps_test = analysistest.make(
     },
 )
 
-def _nested_proc_macro_dep_outputs_are_inputs_impl(ctx):
+def _direct_proc_macro_dep_outputs_are_inputs_impl(ctx):
     env = analysistest.begin(ctx)
     actions = analysistest.target_under_test(env).actions
     rustc_action = None
@@ -159,50 +159,33 @@ def _nested_proc_macro_dep_outputs_are_inputs_impl(ctx):
 
     asserts.false(env, rustc_action == None)
 
-    nested_helper_rlibs = [
+    proc_macro_dep_rlibs = [
         i
         for i in rustc_action.inputs.to_list()
-        if "nested_helper" in i.path and i.extension == "rlib"
+        if "proc_macro_dep" in i.path and i.extension == "rlib"
     ]
-    asserts.equals(env, 1, len(nested_helper_rlibs))
+    proc_macro_dep_args = [arg for arg in rustc_action.argv if "proc_macro_dep" in arg]
+
+    asserts.equals(env, 1, len(proc_macro_dep_rlibs))
+    asserts.equals(env, 0, len(proc_macro_dep_args))
 
     return analysistest.end(env)
 
-def _nested_proc_macro_dep_outputs_are_inputs_test():
-    rust_library(
-        name = "nested_helper",
-        srcs = ["leaks_deps/nested/helper.rs"],
-        edition = "2018",
-    )
-
+def _direct_proc_macro_dep_outputs_are_inputs_test():
     rust_proc_macro(
-        name = "nested_inner_macro",
-        srcs = ["leaks_deps/nested/inner_macro.rs"],
+        name = "proc_macro_uses_proc_macro",
+        srcs = ["leaks_deps/proc_macro_uses_proc_macro.rs"],
         edition = "2018",
-        deps = [":nested_helper"],
+        deps = [":proc_macro_definition"],
     )
 
-    rust_proc_macro(
-        name = "nested_middle_macro",
-        srcs = ["leaks_deps/nested/middle_macro.rs"],
-        edition = "2018",
-        deps = [":nested_inner_macro"],
+    direct_proc_macro_dep_outputs_are_inputs_test(
+        name = "direct_proc_macro_dep_outputs_are_inputs_test",
+        target_under_test = ":proc_macro_uses_proc_macro",
     )
 
-    rust_proc_macro(
-        name = "nested_outer_macro",
-        srcs = ["leaks_deps/nested/outer_macro.rs"],
-        edition = "2018",
-        deps = [":nested_middle_macro"],
-    )
-
-    nested_proc_macro_dep_outputs_are_inputs_test(
-        name = "nested_proc_macro_dep_outputs_are_inputs_test",
-        target_under_test = ":nested_outer_macro",
-    )
-
-nested_proc_macro_dep_outputs_are_inputs_test = analysistest.make(
-    _nested_proc_macro_dep_outputs_are_inputs_impl,
+direct_proc_macro_dep_outputs_are_inputs_test = analysistest.make(
+    _direct_proc_macro_dep_outputs_are_inputs_impl,
 )
 
 def proc_macro_does_not_leak_deps_test_suite(name):
@@ -213,12 +196,12 @@ def proc_macro_does_not_leak_deps_test_suite(name):
     """
     _proc_macro_does_not_leak_deps_test()
     _proc_macro_does_not_leak_lib_deps_test()
-    _nested_proc_macro_dep_outputs_are_inputs_test()
+    _direct_proc_macro_dep_outputs_are_inputs_test()
 
     native.test_suite(
         name = name,
         tests = [
-            ":nested_proc_macro_dep_outputs_are_inputs_test",
+            ":direct_proc_macro_dep_outputs_are_inputs_test",
             ":proc_macro_does_not_leak_deps_test",
             ":proc_macro_does_not_leak_lib_deps_test",
         ],
