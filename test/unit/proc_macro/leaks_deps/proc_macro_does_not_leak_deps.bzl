@@ -18,9 +18,9 @@ def _proc_macro_does_not_leak_deps_impl(ctx):
 
     asserts.false(env, rustc_action == None)
 
-    # Linking actions receive the Cargo Artifact::All closure as inputs, including
-    # rlibs hidden behind proc-macro dependencies. Those hidden crates still must
-    # not become direct rustc arguments.
+    # Normal dependents need the proc-macro output, but not the proc-macro's
+    # implementation rlibs. Those hidden crates must not become inputs or direct
+    # rustc arguments.
     proc_macro_dep_inputs = [
         i
         for i in rustc_action.inputs.to_list()
@@ -28,7 +28,7 @@ def _proc_macro_does_not_leak_deps_impl(ctx):
     ]
     proc_macro_dep_args = [arg for arg in rustc_action.argv if "proc_macro_dep" in arg]
 
-    asserts.equals(env, 1, len(proc_macro_dep_inputs))
+    asserts.equals(env, 0, len(proc_macro_dep_inputs))
     asserts.equals(env, 0, len(proc_macro_dep_args))
 
     # Our test target depends on proc_macro_dep:native directly, as well as transitively through the
@@ -87,6 +87,7 @@ proc_macro_does_not_leak_deps_test = analysistest.make(_proc_macro_does_not_leak
 })
 
 # Tests that a lib_a -> proc_macro -> lib_b does not propagate lib_b to the inputs of lib_a
+# or to downstream dependents of lib_a.
 def _proc_macro_does_not_leak_lib_deps_impl(ctx):
     env = analysistest.begin(ctx)
     actions = analysistest.target_under_test(env).actions
@@ -106,6 +107,25 @@ def _proc_macro_does_not_leak_lib_deps_impl(ctx):
 
         asserts.equals(env, 0, len(b_inputs))
         asserts.equals(env, 0, len(b_args))
+
+    return analysistest.end(env)
+
+def _proc_macro_does_not_leak_lib_deps_to_dependent_impl(ctx):
+    env = analysistest.begin(ctx)
+    actions = analysistest.target_under_test(env).actions
+    rustc_action = None
+    for action in actions:
+        if action.mnemonic == "Rustc":
+            rustc_action = action
+            break
+
+    asserts.false(env, rustc_action == None)
+
+    b_inputs = [i for i in rustc_action.inputs.to_list() if "libb" in i.path]
+    b_args = [arg for arg in rustc_action.argv if "libb" in arg]
+
+    asserts.equals(env, 0, len(b_inputs))
+    asserts.equals(env, 0, len(b_args))
 
     return analysistest.end(env)
 
@@ -134,6 +154,15 @@ def _proc_macro_does_not_leak_lib_deps_test():
         ],
     )
 
+    rust_binary(
+        name = "a_user",
+        srcs = ["leaks_deps/lib/a_user.rs"],
+        edition = "2018",
+        deps = [
+            ":a",
+        ],
+    )
+
     NOT_WINDOWS = select({
         "@platforms//os:linux": [],
         "@platforms//os:macos": [],
@@ -146,11 +175,21 @@ def _proc_macro_does_not_leak_lib_deps_test():
         target_compatible_with = NOT_WINDOWS,
     )
 
+    proc_macro_does_not_leak_lib_deps_to_dependent_test(
+        name = "proc_macro_does_not_leak_lib_deps_to_dependent_test",
+        target_under_test = ":a_user",
+        target_compatible_with = NOT_WINDOWS,
+    )
+
 proc_macro_does_not_leak_lib_deps_test = analysistest.make(
     _proc_macro_does_not_leak_lib_deps_impl,
     config_settings = {
         str(Label("//rust/settings:pipelined_compilation")): True,
     },
+)
+
+proc_macro_does_not_leak_lib_deps_to_dependent_test = analysistest.make(
+    _proc_macro_does_not_leak_lib_deps_to_dependent_impl,
 )
 
 def _direct_proc_macro_dep_outputs_are_inputs_impl(ctx):
@@ -171,7 +210,7 @@ def _direct_proc_macro_dep_outputs_are_inputs_impl(ctx):
     ]
     proc_macro_dep_args = [arg for arg in rustc_action.argv if "proc_macro_dep" in arg]
 
-    asserts.equals(env, 1, len(proc_macro_dep_rlibs))
+    asserts.equals(env, ctx.attr.expected_rlibs, len(proc_macro_dep_rlibs))
     asserts.equals(env, 0, len(proc_macro_dep_args))
 
     return analysistest.end(env)
@@ -193,16 +232,21 @@ def _direct_proc_macro_dep_outputs_are_inputs_test():
 
     direct_proc_macro_dep_outputs_are_inputs_test(
         name = "direct_proc_macro_dep_outputs_are_inputs_test",
+        expected_rlibs = 1,
         target_under_test = ":proc_macro_uses_proc_macro",
     )
 
     direct_proc_macro_dep_outputs_are_inputs_test(
-        name = "nested_proc_macro_dep_outputs_are_inputs_test",
+        name = "nested_proc_macro_dep_outputs_do_not_leak_to_binary_test",
+        expected_rlibs = 0,
         target_under_test = ":cargo_artifact_closure",
     )
 
 direct_proc_macro_dep_outputs_are_inputs_test = analysistest.make(
     _direct_proc_macro_dep_outputs_are_inputs_impl,
+    attrs = {
+        "expected_rlibs": attr.int(mandatory = True),
+    },
 )
 
 def proc_macro_does_not_leak_deps_test_suite(name):
@@ -219,8 +263,9 @@ def proc_macro_does_not_leak_deps_test_suite(name):
         name = name,
         tests = [
             ":direct_proc_macro_dep_outputs_are_inputs_test",
-            ":nested_proc_macro_dep_outputs_are_inputs_test",
+            ":nested_proc_macro_dep_outputs_do_not_leak_to_binary_test",
             ":proc_macro_does_not_leak_deps_test",
             ":proc_macro_does_not_leak_lib_deps_test",
+            ":proc_macro_does_not_leak_lib_deps_to_dependent_test",
         ],
     )
