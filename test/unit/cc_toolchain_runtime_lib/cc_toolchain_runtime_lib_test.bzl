@@ -7,7 +7,7 @@ load("@rules_cc//cc:cc_toolchain_config_lib.bzl", "feature")
 load("@rules_cc//cc:defs.bzl", "cc_toolchain")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/toolchains:cc_toolchain_config_info.bzl", "CcToolchainConfigInfo")
-load("//rust:defs.bzl", "rust_shared_library", "rust_static_library")
+load("//rust:defs.bzl", "rust_library", "rust_shared_library", "rust_static_library")
 
 def _test_cc_config_impl(ctx):
     config_info = cc_common.create_cc_toolchain_config_info(
@@ -77,6 +77,13 @@ def _inputs_analysis_test_impl(ctx):
             "error: expected '{}' to be in inputs: '{}'".format(expected, inputs),
         )
 
+    for unexpected in ctx.attr.unexpected_inputs:
+        asserts.false(
+            env,
+            any([input.path.endswith("/" + unexpected) for input in inputs]),
+            "error: did not expect '{}' to be in inputs: '{}'".format(unexpected, inputs),
+        )
+
     for expected in ctx.attr.expected_link_arg_inputs:
         asserts.true(
             env,
@@ -113,6 +120,7 @@ inputs_analysis_test = analysistest.make(
     doc = """An analysistest to examine the inputs of a library target.""",
     attrs = {
         "expected_inputs": attr.string_list(),
+        "unexpected_inputs": attr.string_list(),
         "expected_args": attr.string_list(),
         "expected_link_arg_inputs": attr.string_list(),
         "expected_runfiles": attr.string_list(),
@@ -121,7 +129,7 @@ inputs_analysis_test = analysistest.make(
 )
 
 def runtime_libs_test(name):
-    """Produces test shared and static library targets that are set up to use a custom cc_toolchain with custom runtime libs.
+    """Tests which C++ toolchain files are inputs to Rust compile and link actions.
 
     Args:
       name: The name of the test target.
@@ -130,12 +138,16 @@ def runtime_libs_test(name):
     test_cc_config(
         name = "%s/cc_toolchain_config" % name,
     )
+    native.filegroup(
+        name = "%s/linker_files" % name,
+        srcs = ["linker_file"],
+    )
     cc_toolchain(
         name = "%s/test_cc_toolchain_impl" % name,
         all_files = ":empty",
         compiler_files = ":empty",
         dwp_files = ":empty",
-        linker_files = ":empty",
+        linker_files = ":%s/linker_files" % name,
         objcopy_files = ":empty",
         strip_files = ":empty",
         supports_param_files = 0,
@@ -148,6 +160,31 @@ def runtime_libs_test(name):
         name = "%s/test_cc_toolchain" % name,
         toolchain = ":%s/test_cc_toolchain_impl" % name,
         toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    )
+
+    rust_library(
+        name = "%s/__library" % name,
+        edition = "2018",
+        srcs = ["lib.rs"],
+        tags = ["manual", "nobuild"],
+    )
+
+    with_extra_toolchain(
+        name = "%s/_library" % name,
+        extra_toolchain = ":%s/test_cc_toolchain" % name,
+        target = "%s/__library" % name,
+        tags = ["manual"],
+    )
+
+    inputs_analysis_test(
+        name = "%s/library" % name,
+        target_under_test = "%s/_library" % name,
+        unexpected_inputs = [
+            "dummy.a",
+            "dummy.so",
+            "empty",
+            "linker_file",
+        ],
     )
 
     rust_shared_library(
@@ -167,7 +204,11 @@ def runtime_libs_test(name):
     inputs_analysis_test(
         name = "%s/shared_library" % name,
         target_under_test = "%s/_shared_library" % name,
-        expected_inputs = ["dummy.so"],
+        expected_inputs = [
+            "dummy.so",
+            "linker_file",
+        ],
+        unexpected_inputs = ["empty"],
         expected_args = select({
             "@platforms//os:windows": ["-ldylib=dummy"],
             "//conditions:default": [],
@@ -200,5 +241,9 @@ def runtime_libs_test(name):
     inputs_analysis_test(
         name = "%s/static_library" % name,
         target_under_test = "%s/_static_library" % name,
-        expected_inputs = ["dummy.a"],
+        expected_inputs = [
+            "dummy.a",
+            "linker_file",
+        ],
+        unexpected_inputs = ["empty"],
     )
