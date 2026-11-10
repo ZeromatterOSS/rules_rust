@@ -32,6 +32,47 @@ directly to the crate types Cargo produces.
   `rust_library`/`rust_binary` (via `crate = ...`) to run its inline `#[test]`s,
   or compile a standalone test binary from its own `srcs`.
 
+## C++ runtime linkage
+
+`cc_runtime_linkage` selects the C++ toolchain runtime for binaries, tests,
+Rust and C ABI shared libraries, procedural macros, and doctests:
+
+| Setting | C++ toolchain runtime |
+| --- | --- |
+| `auto` (default) | Follows Rust std linkage; falls back to static if only a static runtime is supplied |
+| `static` | Static |
+| `dynamic` | Dynamic; fails if only a static runtime is supplied |
+
+Rust std is dynamic when `link_std_dylib = True` or
+`--@rules_rust//rust/settings:experimental_link_std_dylib=true`; a target's `False`
+does not override the build-wide setting. Rust ABI dylibs default to dynamic std;
+binaries, tests, C ABI shared libraries, procedural macros, and doctests default
+to static std. Arbitrary `rustc_flags` do not determine this policy.
+
+Use an explicit setting to choose the C++ runtime independently of Rust std:
+
+```python
+rust_binary(
+    name = "app",
+    srcs = ["main.rs"],
+    link_std_dylib = True,
+    cc_runtime_linkage = "static",  # Override only the C++ runtime selection.
+)
+```
+
+The attribute accepts `select()` for platform-specific policies. Toolchains with
+no explicit runtime libraries rely on their linker configuration.
+
+Configure each final link: dependency crate types do not determine the consumer's
+policy, and doctests use their own attributes. Archives retain static runtime
+inputs; their consumers select the final link policy.
+
+This setting only selects toolchain runtime libraries. It does not inspect symbol
+usage, change ordinary native dependency linkage, or guarantee a single runtime
+or unwinder per process. Dynamic selection can add shared-library dependencies
+even for pure Rust code. Choose compatible toolchains and deploy the required
+shared libraries, including those needed by prebuilt or runtime-loaded code.
+
 ## Additional rules
 
 Non-core rules that ship in the same ruleset:

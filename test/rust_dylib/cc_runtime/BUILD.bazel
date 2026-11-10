@@ -1,0 +1,64 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//rust:defs.bzl", "rust_dylib_library", "rust_test")
+
+# With LLVM's static and dynamic runtimes, check that the two native probes
+# resolve to the same C++ global and unwinder symbol. Hiding archive symbols
+# prevents ELF interposition from masking a second statically linked copy.
+# This does not establish that the process loads only one unwinder library.
+# Run with --extra_toolchains=@llvm//toolchain:all
+#          --@llvm//config:experimental_stub_libgcc_s
+package(default_testonly = True)
+
+LINUX_ONLY = select({
+    "@platforms//os:linux": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+cc_library(
+    name = "native_binary",
+    srcs = ["native_binary.cc"],
+    linkopts = ["-Wl,--exclude-libs,ALL"],
+    target_compatible_with = LINUX_ONLY,
+)
+
+cc_library(
+    name = "native_dylib",
+    srcs = ["native_dylib.cc"],
+    target_compatible_with = LINUX_ONLY,
+)
+
+rust_dylib_library(
+    name = "runtime_probe",
+    srcs = ["lib.rs"],
+    edition = "2021",
+    link_std_dylib = True,
+    target_compatible_with = LINUX_ONLY,
+    deps = [":native_dylib"],
+)
+
+rust_test(
+    name = "rustc_runtime_identity_test",
+    srcs = ["runtime_identity_test.rs"],
+    edition = "2021",
+    link_std_dylib = True,
+    target_compatible_with = LINUX_ONLY,
+    use_libtest_harness = False,
+    deps = [
+        ":native_binary",
+        ":runtime_probe",
+    ],
+)
+
+rust_test(
+    name = "cc_common_runtime_identity_test",
+    srcs = ["runtime_identity_test.rs"],
+    edition = "2021",
+    experimental_use_cc_common_link = 1,
+    link_std_dylib = True,
+    target_compatible_with = LINUX_ONLY,
+    use_libtest_harness = False,
+    deps = [
+        ":native_binary",
+        ":runtime_probe",
+    ],
+)

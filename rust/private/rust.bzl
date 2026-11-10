@@ -16,6 +16,7 @@
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load(":cc_runtime.bzl", "CC_RUNTIME_LINKAGE_ATTRS")
 load(":common.bzl", "COMMON_PROVIDERS", "rust_common")
 load(
     ":per_crate_flag_trim.bzl",
@@ -1055,6 +1056,7 @@ _RUST_TEST_ATTRS = {
         default = False,
         doc = dedent("""\
             Flag to dynamically link the standard library as a Rust dylib .so object when building this test.
+            Also selects the dynamic C++ toolchain runtime when `cc_runtime_linkage` is `auto`.
 
             Default is false. This is often required when testing a target that depends on a Rust ABI dylib.
         """),
@@ -1094,7 +1096,7 @@ _RUST_TEST_ATTRS = {
         default = Label("//rust/private:test_sharding_wrapper.bat"),
         allow_single_file = True,
     ),
-} | _COVERAGE_ATTRS | _EXPERIMENTAL_USE_CC_COMMON_LINK_ATTRS
+} | _COVERAGE_ATTRS | _EXPERIMENTAL_USE_CC_COMMON_LINK_ATTRS | CC_RUNTIME_LINKAGE_ATTRS
 
 rust_library = rule(
     implementation = _rust_library_impl,
@@ -1189,7 +1191,7 @@ rust_library = rule(
 rust_dylib_library = rule(
     implementation = _rust_dylib_library_impl,
     provides = COMMON_PROVIDERS,
-    attrs = _COMMON_ATTRS | {
+    attrs = _COMMON_ATTRS | CC_RUNTIME_LINKAGE_ATTRS | {
         "disable_pipelining": attr.bool(
             default = False,
             doc = dedent("""\
@@ -1203,6 +1205,7 @@ rust_dylib_library = rule(
             default = True,
             doc = dedent("""\
                 Flag to dynamically link the standard library as a Rust dylib .so object when building this library.
+                Also selects the dynamic C++ toolchain runtime when `cc_runtime_linkage` is `auto`.
 
                 Default is true. This is typically required for Rust ABI dylibs so that the stdlib is shared
                 with the binary that loads them, avoiding duplicate symbols.
@@ -1319,25 +1322,9 @@ _rust_shared_library_transition = transition(
     ],
 )
 
-_CC_RUNTIME_LINKAGE_ATTRS = {
-    "cc_runtime_linkage": attr.string(
-        doc = dedent("""\
-            Controls how the C++ runtime (libstdc++/libc++ and the unwinder) is
-            linked into this shared library:
-
-            - `dynamic` (default): link the C++ runtime dynamically (historical
-              behavior).
-            - `static`: embed the C++ runtime so the library has no external
-              libstdc++/libc++/libunwind dependency (a self-contained `.so`).
-            """),
-        values = ["dynamic", "static"],
-        default = "dynamic",
-    ),
-}
-
 rust_cdylib_library = rule(
     implementation = _rust_cdylib_library_impl,
-    attrs = _COMMON_ATTRS | _PLATFORM_ATTRS | _EXPERIMENTAL_USE_CC_COMMON_LINK_ATTRS | _CC_RUNTIME_LINKAGE_ATTRS,
+    attrs = _COMMON_ATTRS | _PLATFORM_ATTRS | _EXPERIMENTAL_USE_CC_COMMON_LINK_ATTRS | CC_RUNTIME_LINKAGE_ATTRS,
     fragments = ["cpp"],
     cfg = _rust_shared_library_transition,
     toolchains = [
@@ -1365,7 +1352,7 @@ rust_proc_macro = rule(
     implementation = _rust_proc_macro_impl,
     provides = COMMON_PROVIDERS,
     cfg = per_crate_flag_trim_transition,
-    attrs = {name: value for name, value in _COMMON_ATTRS.items() if name != "link_deps"} | {
+    attrs = {name: value for name, value in _COMMON_ATTRS.items() if name != "link_deps"} | CC_RUNTIME_LINKAGE_ATTRS | {
         "_allowlist_function_transition": attr.label(
             default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
         ),
@@ -1416,6 +1403,7 @@ _RUST_BINARY_ATTRS = {
         default = False,
         doc = dedent("""\
             Flag to dynamically link the standard library as a Rust dylib .so object when building this binary.
+            Also selects the dynamic C++ toolchain runtime when `cc_runtime_linkage` is `auto`.
 
             Default is false. This is often required when building a binary that depends on a Rust ABI dylib.
         """),
@@ -1427,7 +1415,7 @@ _RUST_BINARY_ATTRS = {
         allow_single_file = True,
     ),
     "stamp": _stamp_attribute(default_value = -1),
-} | _EXPERIMENTAL_USE_CC_COMMON_LINK_ATTRS
+} | _EXPERIMENTAL_USE_CC_COMMON_LINK_ATTRS | CC_RUNTIME_LINKAGE_ATTRS
 
 def _rust_binary_transition_impl(settings, attr):
     # Trim per_crate_rustc_flag for third-party crates to improve cache hit rates

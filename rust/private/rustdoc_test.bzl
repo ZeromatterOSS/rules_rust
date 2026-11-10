@@ -15,6 +15,7 @@
 """Rules for performing `rustdoc --test` on Bazel built crates"""
 
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load("//rust/private:cc_runtime.bzl", "CC_RUNTIME_LINKAGE_ATTRS")
 load("//rust/private:common.bzl", "rust_common")
 load("//rust/private:providers.bzl", "CrateInfo")
 load("//rust/private:rustdoc.bzl", "rustdoc_compile_action")
@@ -124,7 +125,7 @@ def _rust_doc_test_impl(ctx):
 
 rust_doc_test = rule(
     implementation = _rust_doc_test_impl,
-    attrs = {
+    attrs = CC_RUNTIME_LINKAGE_ATTRS | {
         "crate": attr.label(
             doc = (
                 "The label of the target to generate code documentation for. " +
@@ -133,6 +134,10 @@ rust_doc_test = rule(
             ),
             providers = [rust_common.crate_info],
             mandatory = True,
+        ),
+        "link_std_dylib": attr.bool(
+            default = False,
+            doc = "Prefer dynamic Rust std for the doctest link; also selects a dynamic C++ runtime when cc_runtime_linkage is auto.",
         ),
         "crate_features": attr.string_list(
             doc = dedent("""\

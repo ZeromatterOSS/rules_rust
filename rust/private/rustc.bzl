@@ -837,26 +837,45 @@ def _depend_on_metadata(crate_info, force_depend_on_objects):
     return crate_info.type in ("rlib", "lib")
 
 def resolve_cc_runtime_linkage(ctx):
-    """Resolve the effective C++ runtime linkage for a target.
+    """Return the target's C++ runtime policy, defaulting to Rust std linkage."""
+    return getattr(ctx.attr, "cc_runtime_linkage", "auto")
 
-    Driven by the per-target `cc_runtime_linkage` attribute, which only exists on
-    shared-library rules; other rules default to "dynamic" via the getattr default.
+def get_cc_toolchain_runtime(cc_toolchain, feature_configuration, crate_type, linkage = "auto", link_std_dylib = False):
+    """Select toolchain runtime libraries and report their effective linkage.
+
+    Auto follows the configured Rust std linkage at final links. Archives retain
+    static runtime inputs; their consumers choose the final link policy. This
+    does not infer runtime requirements from dependency crate types.
+
+    Args:
+        cc_toolchain: The C++ toolchain, or None.
+        feature_configuration: The toolchain's configured features.
+        crate_type: The type of the crate being linked.
+        linkage: The target's auto, static, or dynamic C++ runtime policy.
+        link_std_dylib: The effective Rust std linkage setting for this link.
+
+    Returns:
+        struct: The selected `libraries` depset and `is_dynamic` boolean.
     """
-    return getattr(ctx.attr, "cc_runtime_linkage", "dynamic")
-
-def get_cc_toolchain_runtime_libs(cc_toolchain, feature_configuration, crate_type, linkage = "dynamic"):
     if not cc_toolchain:
-        return depset()
+        return struct(libraries = depset(), is_dynamic = False)
 
-    if crate_type in ["dylib", "cdylib"] and linkage != "static":
-        # For shared libraries we want to link C++ runtime library dynamically
-        # (for example libstdc++.so or libc++.so).
-        return cc_toolchain.dynamic_runtime_lib(feature_configuration = feature_configuration)
+    use_dynamic = linkage == "dynamic" or (
+        linkage == "auto" and link_std_dylib and crate_type not in ["rlib", "lib", "staticlib"]
+    )
+    if use_dynamic:
+        libraries = cc_toolchain.dynamic_runtime_lib(feature_configuration = feature_configuration)
+        if libraries.to_list():
+            return struct(libraries = libraries, is_dynamic = True)
 
-    # For all other crate types -- and for shared libraries when static linkage
-    # is requested -- we link the C++ runtime library statically (for example
-    # libstdc++.a or libc++.a) so the output carries no external C++ runtime dep.
-    return cc_toolchain.static_runtime_lib(feature_configuration = feature_configuration)
+    libraries = cc_toolchain.static_runtime_lib(feature_configuration = feature_configuration)
+    if linkage == "dynamic" and libraries.to_list():
+        fail("cc_runtime_linkage = 'dynamic' requested, but the C++ toolchain supplies only a static runtime; use 'auto' to allow fallback or 'static' to select it explicitly")
+
+    return struct(libraries = libraries, is_dynamic = False)
+
+def get_cc_toolchain_runtime_libs(cc_toolchain, feature_configuration, crate_type, linkage = "auto", link_std_dylib = False):
+    return get_cc_toolchain_runtime(cc_toolchain, feature_configuration, crate_type, linkage, link_std_dylib).libraries
 
 def collect_inputs(
         ctx,
@@ -983,7 +1002,13 @@ def collect_inputs(
         nolinkstamp_compile_direct_inputs += files.macos_sdkroot
 
     if runtime_libs == None:
-        runtime_libs = get_cc_toolchain_runtime_libs(cc_toolchain, feature_configuration, crate_info.type, resolve_cc_runtime_linkage(ctx))
+        runtime_libs = get_cc_toolchain_runtime_libs(
+            cc_toolchain,
+            feature_configuration,
+            crate_info.type,
+            resolve_cc_runtime_linkage(ctx),
+            link_std_dylib = toolchain._link_std_dylib or getattr(ctx.attr, "link_std_dylib", False),
+        )
 
     nolinkstamp_compile_inputs = depset(
         nolinkstamp_compile_direct_inputs +
@@ -1175,6 +1200,7 @@ def construct_arguments(
         allowed_unstable_rust_features = None,
         link_std_dylib = None,
         runtime_libs = None,
+        cc_runtime_is_dynamic = False,
         linker_plugin_lto = False,
         bin_link_flags = None):
     """Builds an Args object containing common rustc flags
@@ -1250,6 +1276,7 @@ def construct_arguments(
             `--codegen=prefer-dynamic`. If None, use `toolchain._link_std_dylib` or `attr.link_std_dylib`.
         runtime_libs (depset[File], optional): Runtime libraries from the C++ toolchain
             selected for `crate_info.type`.
+        cc_runtime_is_dynamic (bool): Whether `runtime_libs` is a dynamic runtime.
         linker_plugin_lto (bool): Whether to pass `-Clinker-plugin-lto` instead
             of the `//rust/settings:lto` flags.
         bin_link_flags (File, optional): Binary-scoped build-script arguments, selected by `cargo_bin_name`.
@@ -1564,7 +1591,7 @@ def construct_arguments(
                     compilation_mode = compilation_mode,
                     toolchain = toolchain,
                 )
-                rpath_runtime_libs = runtime_libs if crate_info.type in ["dylib", "cdylib"] else None
+                rpath_runtime_libs = runtime_libs if cc_runtime_is_dynamic else None
                 rpaths = _compute_rpaths(
                     toolchain,
                     output_dir,
@@ -1662,6 +1689,7 @@ def construct_arguments(
             include_link_flags = include_link_flags,
             link_libraries_as_link_args = link_libraries_as_link_args,
             runtime_libs = runtime_libs,
+            cc_runtime_is_dynamic = cc_runtime_is_dynamic,
         )
 
         # On macOS, set the dylib install name to @rpath/<basename> so that
@@ -2178,7 +2206,16 @@ def rustc_compile(
     if use_cc_common_link or distributed_thin_lto or scan_msvc_archive_object:
         output_o = ctx.actions.declare_file(crate_info.output.basename + ".o", sibling = crate_info.output)
 
-    runtime_libs = get_cc_toolchain_runtime_libs(cc_toolchain, feature_configuration, crate_info.type, resolve_cc_runtime_linkage(ctx))
+    link_std_dylib = rust_toolchain._link_std_dylib or getattr(attr, "link_std_dylib", False)
+
+    cc_runtime = get_cc_toolchain_runtime(
+        cc_toolchain,
+        feature_configuration,
+        crate_info.type,
+        resolve_cc_runtime_linkage(ctx),
+        link_std_dylib = link_std_dylib,
+    )
+    runtime_libs = cc_runtime.libraries
 
     # Determine if the build is currently running with --stamp
     stamp = is_stamping_enabled(attr)
@@ -2261,11 +2298,6 @@ def rustc_compile(
         dwo_outputs = ctx.actions.declare_directory(fission_directory, sibling = crate_info.output)
         rust_flags.append(("-Zsplit-dwarf-out-dir=%s", dwo_outputs))
 
-    if hasattr(attr, "link_std_dylib"):
-        link_std_dylib = rust_toolchain._link_std_dylib or attr.link_std_dylib
-    else:
-        link_std_dylib = rust_toolchain._link_std_dylib
-
     # Build the env snapshot used to detect a user-managed RUSTC_BOOTSTRAP before
     # any rules_rust-injected values are added. Matches the merge order in the
     # main env assembly below.
@@ -2325,6 +2357,7 @@ def rustc_compile(
         allowed_unstable_rust_features = allowed_unstable_rust_features,
         link_std_dylib = link_std_dylib,
         runtime_libs = runtime_libs,
+        cc_runtime_is_dynamic = cc_runtime.is_dynamic,
         linker_plugin_lto = distributed_thin_lto,
     )
 
@@ -2359,6 +2392,7 @@ def rustc_compile(
             allowed_unstable_rust_features = allowed_unstable_rust_features,
             link_std_dylib = link_std_dylib,
             runtime_libs = runtime_libs,
+            cc_runtime_is_dynamic = cc_runtime.is_dynamic,
             linker_plugin_lto = distributed_thin_lto,
         )
 
@@ -2501,6 +2535,7 @@ def rustc_compile(
             execution_requirements = {"supports-path-mapping": ""} if args.supports_path_mapping else None,
         )
 
+    cc_link_dylib_files = []
     cco_args = {}
     if use_cc_common_link:
         # Wrap the main `.o` file into a compilation output suitable for
@@ -2591,9 +2626,51 @@ def rustc_compile(
             additional_linker_outputs.append(dsym_folder)
             variables_extension["dsym_path"] = dsym_folder
 
+        link_feature_configuration = feature_configuration
+        if cc_runtime.is_dynamic:
+            # cc_common.link otherwise adds the static runtime independently of
+            # runtime_libs. Supply our dynamic selection explicitly, while
+            # keeping ordinary dependencies statically linked.
+            _, link_feature_configuration = find_cc_toolchain(
+                ctx,
+                extra_unsupported_features + ["static_link_cpp_runtimes"],
+            )
+            runtime_libraries = []
+            for library in runtime_libs.to_list():
+                # Toolchain runtimes may already be solib symlinks, which
+                # create_library_to_link cannot wrap directly.
+                runtime_file = ctx.actions.declare_file(
+                    crate_info.output.basename + ".cc_runtime/" + library.basename,
+                    sibling = crate_info.output,
+                )
+                ctx.actions.symlink(output = runtime_file, target_file = library)
+                runtime_libraries.append(cc_common.create_library_to_link(
+                    actions = ctx.actions,
+                    cc_toolchain = cc_toolchain,
+                    feature_configuration = link_feature_configuration,
+                    dynamic_library = runtime_file,
+                ))
+            linking_contexts.append(cc_common.create_linking_context(
+                linker_inputs = depset([cc_common.create_linker_input(
+                    owner = ctx.label,
+                    libraries = depset(runtime_libraries),
+                )]),
+            ))
+
+        # Include the exact solib paths used by cc_common.link, including
+        # dynamic libstd. Their original files alone do not match its RPATHs
+        # when the runfiles tree is moved outside the exec root.
+        cc_link_dylib_files = [
+            library.dynamic_library
+            for linking_context in linking_contexts
+            for linker_input in linking_context.linker_inputs.to_list()
+            for library in linker_input.libraries
+            if _is_dylib(library) and library.dynamic_library
+        ]
+
         linking_outputs = cc_common.link(
             actions = ctx.actions,
-            feature_configuration = feature_configuration,
+            feature_configuration = link_feature_configuration,
             cc_toolchain = cc_toolchain,
             linking_contexts = linking_contexts,
             compilation_outputs = compilation_outputs,
@@ -2703,13 +2780,15 @@ def rustc_compile(
                 ctx.actions.symlink(output = symlink, target_file = dylib)
                 outputs.append(symlink)
                 win_dylib_symlinks.append(symlink)
+
         # Tests execute inside runfiles, where the DLLs must also sit beside the executable.
         transitive_runfiles.append(ctx.runfiles(files = win_dylib_symlinks))
 
-    if cc_toolchain and crate_info.type in ["dylib", "cdylib"]:
+    if cc_runtime.is_dynamic:
         transitive_runfiles.append(ctx.runfiles(
             transitive_files = runtime_libs,
         ))
+    transitive_runfiles.append(ctx.runfiles(files = cc_link_dylib_files))
     runfiles = runfiles.merge_all(transitive_runfiles)
 
     executable = crate_info.output if crate_info.type == "bin" or crate_info.is_test else None
@@ -3681,7 +3760,8 @@ def _add_native_link_flags(
         use_direct_link_driver,
         include_link_flags = True,
         link_libraries_as_link_args = False,
-        runtime_libs = None):
+        runtime_libs = None,
+        cc_runtime_is_dynamic = False):
     """Adds linker flags for all dependencies of the current target.
 
     Args:
@@ -3700,6 +3780,7 @@ def _add_native_link_flags(
             rustc's `-lstatic`/`-ldylib` forms.
         runtime_libs (depset[File], optional): Runtime libraries from the C++ toolchain
             selected for `crate_type`.
+        cc_runtime_is_dynamic (bool): Whether `runtime_libs` is a dynamic runtime.
     """
     if crate_type in ["lib", "rlib"]:
         return
@@ -3759,7 +3840,7 @@ def _add_native_link_flags(
         if runtime_libs == None:
             fail("runtime_libs must be provided when linking {}".format(crate_type))
 
-        if crate_type in ["dylib", "cdylib"]:
+        if cc_runtime_is_dynamic:
             args.add_all(
                 runtime_libs,
                 map_each = _get_dirname,

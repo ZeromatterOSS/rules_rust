@@ -16,7 +16,7 @@
 
 load("//rust/private:common.bzl", "rust_common")
 load("//rust/private:providers.bzl", "LintsInfo")
-load("//rust/private:rustc.bzl", "collect_deps", "collect_inputs", "construct_arguments", "get_cc_toolchain_runtime_libs")
+load("//rust/private:rustc.bzl", "collect_deps", "collect_inputs", "construct_arguments", "get_cc_toolchain_runtime", "resolve_cc_runtime_linkage")
 load(
     "//rust/private:utils.bzl",
     "dedent",
@@ -109,13 +109,21 @@ def rustdoc_compile_action(
         html_input_files.extend(ctx.files.markdown_css)
 
     cc_toolchain, feature_configuration = find_cc_toolchain(ctx)
-    runtime_libs = get_cc_toolchain_runtime_libs(cc_toolchain, feature_configuration, crate_info.type)
-
     dep_info, build_info, _ = collect_deps(
         deps = crate_info.deps.to_list(),
         proc_macro_deps = crate_info.proc_macro_deps.to_list(),
         aliases = crate_info.aliases,
     )
+
+    # Doctests link as binaries, so they pick the C++ runtime a binary would.
+    cc_runtime = get_cc_toolchain_runtime(
+        cc_toolchain,
+        feature_configuration,
+        "bin" if is_test and crate_info.type in ["lib", "rlib"] else crate_info.type,
+        linkage = resolve_cc_runtime_linkage(ctx),
+        link_std_dylib = toolchain._link_std_dylib or getattr(ctx.attr, "link_std_dylib", False),
+    )
+    runtime_libs = cc_runtime.libraries
 
     compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs = collect_inputs(
         ctx = ctx,
@@ -166,6 +174,7 @@ def rustdoc_compile_action(
         force_depend_on_objects = is_test,
         skip_expanding_rustc_env = True,
         runtime_libs = runtime_libs,
+        cc_runtime_is_dynamic = cc_runtime.is_dynamic,
     )
 
     # Create the combined inputs including HTML customization files
