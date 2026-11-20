@@ -16,6 +16,7 @@ mod flags;
 mod options;
 mod output;
 mod rustc;
+mod stamp_env;
 mod util;
 
 use std::collections::HashMap;
@@ -381,6 +382,9 @@ fn check_output_for_working_dir(
 }
 
 fn main() -> Result<(), ProcessWrapperError> {
+    if std::env::args().nth(1).as_deref() == Some("--resolve-stamp-env") {
+        return stamp_env::resolve(std::env::args().skip(2)).map_err(ProcessWrapperError);
+    }
     let opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?;
 
     let (child_arguments, dep_dir_cleanup) =
@@ -409,7 +413,7 @@ fn main() -> Result<(), ProcessWrapperError> {
         .spawn()
         .map_err(|e| ProcessWrapperError(format!("failed to spawn child process: {}", e)))?;
 
-    let mut stderr: Box<dyn io::Write> = if let Some(stderr_file) = opts.stderr_file {
+    let mut stderr: Box<dyn io::Write> = if let Some(stderr_file) = &opts.stderr_file {
         Box::new(
             OpenOptions::new()
                 .create(true)
@@ -460,7 +464,25 @@ fn main() -> Result<(), ProcessWrapperError> {
     let status = child
         .wait()
         .map_err(|e| ProcessWrapperError(format!("failed to wait for child process: {}", e)))?;
-    let code = status.code().unwrap_or(1);
+    let code = match status.code() {
+        Some(code) => code,
+        None if opts.captured_exit_code_file.is_some() => {
+            let mut message = format!("child terminated without an exit code: {status}");
+            if let Some(stderr_file) = &opts.stderr_file {
+                // A failed action skips the test runner that would replay this file.
+                drop(stderr);
+                let replay_result = fs::File::open(stderr_file)
+                    .and_then(|mut file| io::copy(&mut file, &mut io::stderr().lock()));
+                if let Err(error) = replay_result {
+                    message.push_str(&format!(
+                        "\nfailed to replay captured stderr from {stderr_file}: {error}"
+                    ));
+                }
+            }
+            return Err(ProcessWrapperError(message));
+        }
+        None => 1,
+    };
     // Close our handle on the stdout file before emptying it.
     drop(command);
     if code == 0 && opts.discard_stdout_on_success {

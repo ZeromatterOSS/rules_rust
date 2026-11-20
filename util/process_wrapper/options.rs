@@ -61,9 +61,9 @@ pub(crate) fn options() -> Result<Options, OptionError> {
     // Process argument list until -- is encountered.
     // Everything after is sent to the child process.
     let mut subst_mapping_raw = None;
-    let mut stable_status_file_raw = None;
     let mut volatile_status_file_raw = None;
     let mut env_file_raw = None;
+    let mut resolved_env_file_raw = None;
     let mut out_dir_raw = None;
     let mut arg_file_raw = None;
     let mut bin_arg_file_raw = None;
@@ -80,8 +80,12 @@ pub(crate) fn options() -> Result<Options, OptionError> {
     let mut flags = Flags::new();
     let mut require_explicit_unstable_features = None;
     flags.define_repeated_flag("--subst", "", &mut subst_mapping_raw);
-    flags.define_flag("--stable-status-file", "", &mut stable_status_file_raw);
     flags.define_flag("--volatile-status-file", "", &mut volatile_status_file_raw);
+    flags.define_flag(
+        "--resolved-env-file",
+        "Resolved workspace stamp environment (JSON).",
+        &mut resolved_env_file_raw,
+    );
     flags.define_repeated_flag(
         "--env-file",
         "File(s) containing environment variables to pass to the child process.",
@@ -140,7 +144,7 @@ pub(crate) fn options() -> Result<Options, OptionError> {
     );
     flags.define_flag(
         "--captured-exit-code-file",
-        "Write subprocess exit code to this file and exit successfully.",
+        "Write a numeric subprocess exit code to this file and exit successfully. If the subprocess is terminated by a signal, fail without writing the file.",
         &mut captured_exit_code_file,
     );
     flags.define_flag(
@@ -160,10 +164,15 @@ pub(crate) fn options() -> Result<Options, OptionError> {
         &mut require_explicit_unstable_features,
     );
 
-    let mut child_args = match flags
-        .parse(env::args().collect())
-        .map_err(OptionError::FlagError)?
-    {
+    let mut argv: Vec<_> = env::args().collect();
+    if let Some(path) = argv.get(1).and_then(|arg| arg.strip_prefix("--flagfile=")) {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| OptionError::Generic(format!("failed to read flag file {path:?}: {e}")))?;
+        // Bazel places the wrapper's flag file first and writes one argument per line.
+        argv.splice(1..2, contents.lines().map(str::to_owned));
+    }
+
+    let mut child_args = match flags.parse(argv).map_err(OptionError::FlagError)? {
         ParseOutcome::Help(help) => {
             eprintln!("{help}");
             exit(0);
@@ -236,11 +245,13 @@ pub(crate) fn options() -> Result<Options, OptionError> {
         // sync with where the file is actually materialized.
         subst_mappings.push(("out_dir".to_owned(), out_dir.to_owned()));
     }
-    let stable_stamp_mappings =
-        stable_status_file_raw.map_or_else(Vec::new, |s| read_stamp_status_to_array(s).unwrap());
     let volatile_stamp_mappings =
         volatile_status_file_raw.map_or_else(Vec::new, |s| read_stamp_status_to_array(s).unwrap());
     let mut environment_file_block = env_from_files(env_file_raw.unwrap_or_default())?;
+    if let Some(path) = resolved_env_file_raw {
+        environment_file_block
+            .extend(crate::stamp_env::read_environment(&path).map_err(OptionError::Generic)?);
+    }
     if let Some(out_dir) = out_dir_raw.as_deref() {
         // `OUT_DIR` is materialized here (rather than in the action's `env`
         // dict on the rules_rust side) so that the value can flow through
@@ -318,7 +329,6 @@ pub(crate) fn options() -> Result<Options, OptionError> {
     // of the current process.
     let vars = environment_block(
         environment_file_block,
-        &stable_stamp_mappings,
         &volatile_stamp_mappings,
         &subst_mappings,
     );
@@ -388,7 +398,7 @@ fn select_binary_args(records: Vec<String>, name: &str) -> Result<Vec<String>, O
     Ok(args)
 }
 
-fn env_from_files(paths: Vec<String>) -> Result<HashMap<String, String>, OptionError> {
+pub(crate) fn env_from_files(paths: Vec<String>) -> Result<HashMap<String, String>, OptionError> {
     let mut env_vars = HashMap::new();
     for path in paths.into_iter() {
         let lines = read_file_to_array(&path).map_err(OptionError::Generic)?;
@@ -512,7 +522,6 @@ fn prepare_args(
 
 fn environment_block(
     environment_file_block: HashMap<String, String>,
-    stable_stamp_mappings: &[(String, String)],
     volatile_stamp_mappings: &[(String, String)],
     subst_mappings: &[(String, String)],
 ) -> HashMap<String, String> {
@@ -523,7 +532,7 @@ fn environment_block(
     // This is simpler than needing to track duplicates and explicitly override
     // them.
     environment_variables.extend(environment_file_block);
-    for (f, replace_with) in &[stable_stamp_mappings, volatile_stamp_mappings].concat() {
+    for (f, replace_with) in volatile_stamp_mappings {
         for value in environment_variables.values_mut() {
             let from = format!("{{{f}}}");
             let new = value.replace(from.as_str(), replace_with);
